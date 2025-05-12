@@ -10,13 +10,14 @@ jobs:
     name: rustfmt check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
           default: true
           components: rustfmt
-      - run: cargo fmt --all -- --check
+          toolchain: nightly
+      - run: cargo +nightly fmt --all -- --check
       - uses: crate-ci/typos@v1
   lint-test:
     name: clippy lint and unit tests
@@ -26,27 +27,27 @@ jobs:
         profile:
           - ""
           - "--release"
+        toolchain:
+          - beta
+          - nightly
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
           default: true
           components: clippy
-      - uses: actions/cache@v2
+          toolchain: ${{matrix.toolchain}}
+      - uses: actions/cache@v4
         with:
           path: |
             /home/runner/.cargo
             **/target
-          key: ${{ hashFiles('**/Cargo.lock') }}
+          key: ${{matrix.toolchain}}${{matrix.profile}}-${{hashFiles('**/Cargo.lock')}}
       - name: cargo clippy
-        uses: actions-rs/clippy-check@v1
-        with:
-          token: ${{secrets.GITHUB_TOKEN}}
-          args: --tests --all ${{matrix.profile}}
-          name: clippy
+        run: cargo +${{matrix.toolchain}} clippy --all --tests ${{matrix.profile}}
       - name: cargo test
-        run: "cargo test --all ${{matrix.profile}}"
+        run: "cargo +${{matrix.toolchain}} test --all ${{matrix.profile}}"
   miri:
     name: miri tests
     runs-on: ubuntu-latest
@@ -54,14 +55,22 @@ jobs:
       matrix:
         profile:
           - ""
-          - "--release"
+        toolchain:
+          - nightly
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           default: true
           components: miri
+          toolchain: ${{matrix.toolchain}}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/.cargo
+            **/target
+          key: ${{matrix.toolchain}}${{matrix.profile}}-${{hashFiles('**/Cargo.lock')}}-miri
       - name: cargo miri test
-        run: cargo miri test ${{ matrix.profile }}
+        run: cargo +${{matrix.toolchain}} miri test ${{ matrix.profile }}
 
