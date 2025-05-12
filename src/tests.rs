@@ -1,3 +1,6 @@
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::WordVec;
 
 #[test]
@@ -33,4 +36,40 @@ fn test_push() {
     wv.push(24);
     assert_eq!(wv.len(), 5);
     assert_eq!(wv.as_slice(), &[42, 55, 67, 93, 24]);
+}
+
+#[test]
+fn test_from_and_into_iter() {
+    fn assert<const N: usize, const M: usize>(inputs: [i32; M]) {
+        let wv = WordVec::<i32, N>::from(inputs);
+        let vec: Vec<_> = wv.into_iter().collect();
+        assert_eq!(vec, inputs);
+    }
+
+    assert::<1, 0>([]);
+    assert::<1, 1>([42]);
+    assert::<1, 2>([42, 55]);
+    assert::<2, 0>([]);
+    assert::<2, 1>([42]);
+    assert::<2, 2>([42, 55]);
+}
+
+#[test]
+fn test_into_iter_drop() {
+    fn assert<const N: usize>(inputs: &[&str], explicit_drops: usize) {
+        let mut wv = WordVec::<String, N>::default();
+
+        for &input in inputs {
+            wv.push(input.into());
+        }
+
+        let mut iter = wv.into_iter();
+        for _ in 0..explicit_drops {
+            iter.next().unwrap();
+        }
+
+        drop(iter);
+    }
+
+    assert::<1>(&["a", "b", "c", "d"], 2);
 }

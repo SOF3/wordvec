@@ -5,9 +5,10 @@ extern crate alloc;
 use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
 use core::alloc::Layout;
 use core::hint::assert_unchecked;
-use core::mem::{ManuallyDrop, MaybeUninit};
+use core::iter::FusedIterator;
+use core::mem::{ManuallyDrop, MaybeUninit, needs_drop};
 use core::ptr::{self, NonNull};
-use core::{iter, slice};
+use core::{array, iter, slice};
 
 #[cfg(test)]
 mod tests;
@@ -115,7 +116,9 @@ impl<T> Large<T> {
         let Some(new_ptr) = NonNull::new(new_ptr) else { handle_alloc_error(new_layout) };
         self.0 = new_ptr.cast();
         // SAFETY: the previous `cap` value was initialized to a valid value.
-        unsafe {(*self.0.as_ptr()).cap = new_cap;}
+        unsafe {
+            (*self.0.as_ptr()).cap = new_cap;
+        }
     }
 
     /// Create a new `Large` and move the data from `src` to `dest`.
@@ -152,8 +155,8 @@ impl<T> Large<T> {
 /// directly.
 #[repr(C)]
 struct Allocated<T> {
-    len:  usize,
-    cap:  usize,
+    len:         usize,
+    cap:         usize,
     _data_start: [T; 0], // alignment of T, without the size of T.
 }
 
@@ -165,8 +168,8 @@ impl<T> Allocated<T> {
     /// - `src` is invalid after this function returns.
     /// - `src` must not be derived from `self`.
     unsafe fn extend(mut this: NonNull<Self>, src: *mut [T]) {
-        let old_len = unsafe{this.as_ref()}.len;
-        unsafe{this.as_mut()}.len += src.len();
+        let old_len = unsafe { this.as_ref() }.len;
+        unsafe { this.as_mut() }.len += src.len();
 
         // SAFETY: length of self.data == self.cap >= new self.len >= old_len
         let dest_start = unsafe { Self::data_start(this).add(old_len) };
@@ -178,6 +181,10 @@ impl<T> Allocated<T> {
         }
     }
 
+    /// # Safety
+    /// `this` must point to a valid header.
+    ///
+    /// The data behind the header are allowed to be uninitialized.
     unsafe fn data_start(this: NonNull<Self>) -> *mut T {
         unsafe { (&raw mut (*this.as_ptr())._data_start).cast() }
     }
@@ -307,7 +314,7 @@ impl<T, const N: usize> WordVec<T, N> {
     unsafe fn extend_large(&mut self, values: *mut [T]) {
         // SAFETY: function safety invariant
         let large = unsafe { &mut self.0.large };
-        let (&Allocated { len, cap, ..}, _) = large.as_allocated();
+        let (&Allocated { len, cap, .. }, _) = large.as_allocated();
         let new_len = len.checked_add(values.len()).expect("new length is out of bounds");
         if new_len > cap {
             large.grow(new_len);
@@ -393,13 +400,124 @@ impl<T, const N: usize> Drop for WordVec<T, N> {
                 // SAFETY: `allocated.data` is always a valid slice pointer of length `allocated.len`,
                 // and the destructor is only called once from its owner.
                 unsafe {
-                    let slice_ptr =
-                        ptr::slice_from_raw_parts_mut(data_start, allocated.len);
+                    let slice_ptr = ptr::slice_from_raw_parts_mut(data_start, allocated.len);
                     slice_ptr.drop_in_place();
                 };
 
                 // SAFETY: everything is now cleaned up, the allocation will no longer be used.
-                unsafe { dealloc(large.0.as_ptr().cast(), large.current_layout()); }
+                unsafe {
+                    dealloc(large.0.as_ptr().cast(), large.current_layout());
+                }
+            }
+        }
+    }
+}
+
+impl<'a, T, const N: usize> IntoIterator for &'a WordVec<T, N> {
+    type Item = &'a T;
+    type IntoIter = slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter { self.as_slice().iter() }
+}
+
+impl<'a, T, const N: usize> IntoIterator for &'a mut WordVec<T, N> {
+    type Item = &'a mut T;
+    type IntoIter = slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter { self.as_mut_slice().iter_mut() }
+}
+
+impl<T, const N: usize> IntoIterator for WordVec<T, N> {
+    type Item = T;
+    type IntoIter = IntoIter<T, N>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let mut this = ManuallyDrop::new(self); // the real destructor is called by `IntoIter`.
+        match this.0.parse_marker() {
+            ParsedMarker::Small(len) => {
+                // SAFETY: indicated by marker
+                let small = unsafe { ManuallyDrop::take(&mut this.0.small) };
+                let data = small.data;
+                let valid = data.into_iter().take(len.into());
+                IntoIter(IntoIterInner::Small(valid.into_iter()))
+            }
+            ParsedMarker::Large => {
+                // SAFETY: indicated by marker
+                let alloc = unsafe { this.0.large.0 };
+                IntoIter(IntoIterInner::Large { alloc, start: 0 })
+            }
+        }
+    }
+}
+
+pub struct IntoIter<T, const N: usize>(IntoIterInner<T, N>);
+
+enum IntoIterInner<T, const N: usize> {
+    Small(iter::Take<array::IntoIter<MaybeUninit<T>, N>>),
+    Large { alloc: NonNull<Allocated<T>>, start: usize },
+}
+
+impl<T, const N: usize> Iterator for IntoIter<T, N> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.0 {
+            IntoIterInner::Small(iter) => {
+                // SAFETY: only initialized values are taken
+                iter.next().map(|uninit| unsafe { uninit.assume_init() })
+            }
+            IntoIterInner::Large { alloc, start } => {
+                // SAFETY: the header is always valid before drop.
+                let len = unsafe { alloc.as_mut() }.len;
+
+                let index = *start;
+                if index >= len {
+                    return None;
+                }
+                *start = index + 1;
+
+                let value = unsafe { Allocated::data_start(*alloc) };
+                // SAFETY: index was not consumed before this function was called.
+                let value = unsafe { ptr::read(value.add(index)) };
+                Some(value)
+            }
+        }
+    }
+}
+
+// Small: array::IntoIter implements FusedIterator.
+// Large: we check `index >= len` before incrementing (not doing so may lead to UB caused by
+// overflow).
+impl<T, const N: usize> FusedIterator for IntoIter<T, N> {}
+
+impl<T, const N: usize> Drop for IntoIter<T, N> {
+    fn drop(&mut self) {
+        match &mut self.0 {
+            IntoIterInner::Small(iter) => {
+                // SAFETY: only initialized values are taken
+                iter.by_ref().for_each(|uninit| drop(unsafe { uninit.assume_init() }));
+            }
+            IntoIterInner::Large { alloc, start } => {
+                // SAFETY: the header is always valid before drop.
+                let &mut Allocated { len, cap, .. } = unsafe { alloc.as_mut() };
+
+                if needs_drop::<T>() {
+                    let value = unsafe { Allocated::data_start(*alloc) };
+                    // SAFETY: `start` <= `len`.
+                    let start_ptr = unsafe { value.add(*start) };
+                    // SAFETY: All items in the range start..len are still initialized and need
+                    // dropping.
+                    unsafe {
+                        let to_drop = ptr::slice_from_raw_parts_mut(start_ptr, len - *start);
+                        ptr::drop_in_place(to_drop);
+                    }
+                }
+
+                let layout = Large::<T>::new_layout(cap);
+                // SAFETY: alloc is valid before dropped; layout is provided by the header itself.
+                unsafe {
+                    dealloc(alloc.as_ptr().cast(), layout);
+                }
             }
         }
     }

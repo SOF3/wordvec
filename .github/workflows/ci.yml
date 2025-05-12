@@ -1,0 +1,67 @@
+name: CI
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  fmt:
+    name: rustfmt check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          default: true
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - uses: crate-ci/typos@v1
+  lint-test:
+    name: clippy lint and unit tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile:
+          - ""
+          - "--release"
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          default: true
+          components: clippy
+      - uses: actions/cache@v2
+        with:
+          path: |
+            /home/runner/.cargo
+            **/target
+          key: ${{ hashFiles('**/Cargo.lock') }}
+      - name: cargo clippy
+        uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{secrets.GITHUB_TOKEN}}
+          args: --tests --all ${{matrix.profile}}
+          name: clippy
+      - name: cargo test
+        run: "cargo test --all ${{matrix.profile}}"
+  miri:
+    name: miri tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile:
+          - ""
+          - "--release"
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          default: true
+          components: miri
+      - name: cargo miri test
+        run: cargo miri test ${{ matrix.profile }}
+
