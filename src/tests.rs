@@ -4,6 +4,14 @@ use alloc::vec::Vec;
 use crate::WordVec;
 
 #[test]
+#[cfg(target_pointer_width = "64")]
+fn assert_size() {
+    assert_eq!(size_of::<WordVec<i32, 1>>(), 8);
+    assert_eq!(size_of::<WordVec<i16, 3>>(), 8);
+    assert_eq!(size_of::<WordVec<i8, 7>>(), 8);
+}
+
+#[test]
 fn test_from_and_as_slice() {
     fn assert<const N: usize, const M: usize>(inputs: [i32; M]) {
         let wv = WordVec::<i32, N>::from(inputs);
