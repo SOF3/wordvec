@@ -39,6 +39,20 @@ fn test_push() {
 }
 
 #[test]
+fn test_extend() {
+    let mut wv = WordVec::<i32, 2>::new();
+    wv.extend([42]);
+    assert_eq!(wv.len(), 1);
+    assert_eq!(wv.as_slice(), &[42]);
+    wv.extend([55, 67]);
+    assert_eq!(wv.len(), 3);
+    assert_eq!(wv.as_slice(), &[42, 55, 67]);
+    wv.extend([93, 24, 17, 84]);
+    assert_eq!(wv.len(), 7);
+    assert_eq!(wv.as_slice(), &[42, 55, 67, 93, 24, 17, 84]);
+}
+
+#[test]
 fn test_from_and_into_iter() {
     fn assert<const N: usize, const M: usize>(inputs: [i32; M]) {
         let wv = WordVec::<i32, N>::from(inputs);

@@ -55,6 +55,7 @@ jobs:
       matrix:
         profile:
           - ""
+          - "--release"
         toolchain:
           - nightly
     steps:

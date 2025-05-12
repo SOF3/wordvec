@@ -1,19 +1,23 @@
 #![no_std]
+#![warn(clippy::pedantic)]
 
 extern crate alloc;
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
 use core::alloc::Layout;
+use core::hash::{self, Hash};
 use core::hint::assert_unchecked;
 use core::iter::FusedIterator;
 use core::mem::{ManuallyDrop, MaybeUninit, needs_drop};
+use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
-use core::{array, iter, slice};
+use core::{array, cmp, fmt, iter, slice};
 
 #[cfg(test)]
 mod tests;
 
 mod polyfill;
+#[allow(clippy::wildcard_imports)]
 use polyfill::*;
 
 pub struct WordVec<T, const N: usize>(Inner<T, N>);
@@ -136,7 +140,7 @@ impl<T> Large<T> {
 
         // SAFETY: `ptr` can be derefed as an `Allocated<T>` since it was just allocated as such.
         unsafe {
-            ptr.write(Allocated::<T> { cap, len: 0, _data_start: [] });
+            ptr.write(Allocated::<T> { cap, len: 0, data_start: [] });
         }
 
         // SAFETY: The underlying `Allocated` is now initialized with the correct length and
@@ -155,9 +159,9 @@ impl<T> Large<T> {
 /// directly.
 #[repr(C)]
 struct Allocated<T> {
-    len:         usize,
-    cap:         usize,
-    _data_start: [T; 0], // alignment of T, without the size of T.
+    len:        usize,
+    cap:        usize,
+    data_start: [T; 0], // alignment of T, without the size of T.
 }
 
 impl<T> Allocated<T> {
@@ -186,11 +190,12 @@ impl<T> Allocated<T> {
     ///
     /// The data behind the header are allowed to be uninitialized.
     unsafe fn data_start(this: NonNull<Self>) -> *mut T {
-        unsafe { (&raw mut (*this.as_ptr())._data_start).cast() }
+        unsafe { (&raw mut (*this.as_ptr()).data_start).cast() }
     }
 }
 
 impl<T, const N: usize> WordVec<T, N> {
+    #[must_use]
     pub fn new() -> Self { Self::default() }
 
     pub fn as_slice(&self) -> &[T] {
@@ -271,12 +276,12 @@ impl<T, const N: usize> WordVec<T, N> {
                     self.move_small_to_large(N + 1);
                 }
                 let mut values = ManuallyDrop::new([value]);
-                // SAFETY: marker is Small
+                // SAFETY: we have moved to large right above.
                 unsafe { self.extend_large(&mut *values) }
             }
             ParsedMarker::Large => {
                 let mut values = ManuallyDrop::new([value]);
-                // SAFETY: marker is Small
+                // SAFETY: marker is Large
                 unsafe { self.extend_large(&mut *values) }
             }
         }
@@ -309,7 +314,25 @@ impl<T, const N: usize> WordVec<T, N> {
     }
 
     /// # Safety
-    /// - The current marker must be `large`
+    /// The current marker must be `small` (which will not overflow `u8`).
+    ///
+    /// # Panics
+    /// Panics if `values` yields more than `N - self.len()` items.
+    unsafe fn extend_small_iter(&mut self, values: impl Iterator<Item = T>) {
+        // SAFETY: function safety invariant
+        let small = unsafe { &mut self.0.small };
+
+        let current_len = usize::from(small.marker >> 1);
+
+        for (i, value) in values.enumerate() {
+            let dest = small.data.get_mut(current_len + i).expect("values has too many items");
+            dest.write(value);
+            small.marker += 2; // this will not overflow since length <= N <= 127
+        }
+    }
+
+    /// # Safety
+    /// - The current marker must be `large`.
     /// - `values` has the same invariants as [`ptr::drop_in_place`].
     unsafe fn extend_large(&mut self, values: *mut [T]) {
         // SAFETY: function safety invariant
@@ -318,15 +341,32 @@ impl<T, const N: usize> WordVec<T, N> {
         let new_len = len.checked_add(values.len()).expect("new length is out of bounds");
         if new_len > cap {
             large.grow(new_len);
+        }
 
-            // SAFETY: `large` has grown to at least `new_len`.
+        // SAFETY: checked in the condition.
+        unsafe {
+            Allocated::extend(large.0, values);
+        }
+    }
+
+    /// # Safety
+    /// The current marker must be `large`.
+    unsafe fn extend_large_iter(&mut self, values: impl Iterator<Item = T>) {
+        // SAFETY: function safety invariant
+        let large = unsafe { &mut self.0.large };
+        let (&Allocated { len, cap, .. }, _) = large.as_allocated();
+
+        let (hint_min, _) = values.size_hint();
+        let hint_len = len.checked_add(hint_min).expect("new length out of bounds");
+
+        if hint_len > cap {
+            large.grow(hint_len);
+        }
+
+        for item in values {
+            let mut value = ManuallyDrop::new([item]);
             unsafe {
-                Allocated::extend(large.0, values);
-            }
-        } else {
-            // SAFETY: checked in the condition.
-            unsafe {
-                Allocated::extend(large.0, values);
+                self.extend_large(&raw mut value[..]);
             }
         }
     }
@@ -411,6 +451,78 @@ impl<T, const N: usize> Drop for WordVec<T, N> {
             }
         }
     }
+}
+
+impl<T, const N: usize> Extend<T> for WordVec<T, N> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let mut iter = iter.into_iter();
+        let hint_min = iter.size_hint().0;
+
+        match self.0.parse_marker() {
+            ParsedMarker::Small(len) if usize::from(len) + hint_min <= N => {
+                // SAFETY: marker is Small
+                unsafe {
+                    self.extend_small_iter(iter.by_ref().take(N - usize::from(len)));
+                }
+
+                let mut peekable = iter.peekable();
+                if peekable.peek().is_some() {
+                    // The iterator has more items than `hint_min`.
+                    // We don't know how many more we will get, so our best bet is to double it.
+                    unsafe {
+                        self.move_small_to_large(N * 2);
+                    }
+                    // SAFETY: we have moved to large right above.
+                    unsafe { self.extend_large_iter(peekable) }
+                }
+            }
+            ParsedMarker::Small(len) => {
+                unsafe {
+                    self.move_small_to_large(usize::from(len) + hint_min);
+                }
+                // SAFETY: we have moved to large right above.
+                unsafe { self.extend_large_iter(iter) }
+            }
+            ParsedMarker::Large => {
+                // SAFETY: marker is Large
+                unsafe { self.extend_large_iter(iter) }
+            }
+        }
+    }
+}
+
+impl<T: fmt::Debug, const N: usize> fmt::Debug for WordVec<T, N> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { fmt::Debug::fmt(self.as_slice(), f) }
+}
+
+impl<T, const N: usize> Deref for WordVec<T, N> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target { self.as_slice() }
+}
+
+impl<T, const N: usize> DerefMut for WordVec<T, N> {
+    fn deref_mut(&mut self) -> &mut Self::Target { self.as_mut_slice() }
+}
+
+impl<T: PartialEq, const N: usize> PartialEq for WordVec<T, N> {
+    fn eq(&self, other: &Self) -> bool { self.as_slice() == other.as_slice() }
+}
+
+impl<T: Eq, const N: usize> Eq for WordVec<T, N> {}
+
+impl<T: PartialOrd, const N: usize> PartialOrd for WordVec<T, N> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.as_slice().partial_cmp(other.as_slice())
+    }
+}
+
+impl<T: Ord, const N: usize> Ord for WordVec<T, N> {
+    fn cmp(&self, other: &Self) -> cmp::Ordering { self.as_slice().cmp(other.as_slice()) }
+}
+
+impl<T: Hash, const N: usize> Hash for WordVec<T, N> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) { self.as_slice().hash(state); }
 }
 
 impl<'a, T, const N: usize> IntoIterator for &'a WordVec<T, N> {

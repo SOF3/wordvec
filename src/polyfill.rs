@@ -1,4 +1,6 @@
-//! Polyfilled unstable APIs from feature(maybe_uninit_slice).
+//! Polyfilled unstable APIs from the `maybe_uninit_slice` feature.
+
+#![allow(clippy::pedantic)] // these are problems from libcore implementation.
 
 use core::mem::MaybeUninit;
 use core::ptr;
@@ -11,7 +13,6 @@ use core::ptr;
 /// Calling this when the content is not yet fully initialized causes undefined
 /// behavior: it is up to the caller to guarantee that every `MaybeUninit<T>` in
 /// the slice really is in an initialized state.
-#[inline(always)]
 pub const unsafe fn slice_assume_init_ref<T>(slice: &[MaybeUninit<T>]) -> &[T] {
     // SAFETY: casting `slice` to a `*const [T]` is safe since the caller guarantees that
     // `slice` is initialized, and `MaybeUninit` is guaranteed to have the same layout as `T`.
@@ -28,7 +29,6 @@ pub const unsafe fn slice_assume_init_ref<T>(slice: &[MaybeUninit<T>]) -> &[T] {
 /// behavior: it is up to the caller to guarantee that every `MaybeUninit<T>` in the
 /// slice really is in an initialized state. For instance, `.assume_init_mut()` cannot
 /// be used to initialize a `MaybeUninit` slice.
-#[inline(always)]
 pub const unsafe fn slice_assume_init_mut<T>(slice: &mut [MaybeUninit<T>]) -> &mut [T] {
     // SAFETY: similar to safety notes for `slice_assume_init_ref`, but we have a
     // mutable reference which is also guaranteed to be valid for writes.
@@ -51,7 +51,6 @@ pub const unsafe fn slice_assume_init_mut<T>(slice: &mut [MaybeUninit<T>]) -> &m
 /// requirement the compiler knows about it is that the data pointer must be
 /// non-null. Dropping such a `Vec<T>` however will cause undefined
 /// behaviour.
-#[inline(always)]
 pub unsafe fn slice_assume_init_drop<T>(slice: &mut [MaybeUninit<T>]) {
     if !slice.is_empty() {
         // SAFETY: the caller must guarantee that every element of `slice`
