@@ -87,3 +87,35 @@ fn test_into_iter_drop() {
 
     assert::<1>(&["a", "b", "c", "d"], 2);
 }
+
+#[test]
+fn test_remove_small() {
+    let mut wv = WordVec::<i32, 4>::from([1, 2, 3]);
+    assert_eq!(wv.remove(0), 1);
+    assert_eq!(wv.as_slice(), &[2, 3]);
+}
+
+#[test]
+fn test_remove_large() {
+    let mut wv = WordVec::<i32, 4>::from([1, 2, 3, 4, 5]);
+    assert_eq!(wv.remove(0), 1);
+    assert_eq!(wv.as_slice(), &[2, 3, 4, 5]);
+    assert_eq!(wv.remove(1), 3);
+    assert_eq!(wv.as_slice(), &[2, 4, 5]);
+}
+
+#[test]
+fn test_swap_remove_small() {
+    let mut wv = WordVec::<i32, 4>::from([1, 2, 3]);
+    assert_eq!(wv.swap_remove(0), 1);
+    assert_eq!(wv.as_slice(), &[3, 2]);
+}
+
+#[test]
+fn test_swap_remove_large() {
+    let mut wv = WordVec::<i32, 4>::from([1, 2, 3, 4, 5]);
+    assert_eq!(wv.swap_remove(0), 1);
+    assert_eq!(wv.as_slice(), &[5, 2, 3, 4]);
+    assert_eq!(wv.swap_remove(1), 2);
+    assert_eq!(wv.as_slice(), &[5, 4, 3]);
+}

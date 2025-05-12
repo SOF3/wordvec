@@ -2,12 +2,13 @@
 
 A compact `SmallVec<T>`-like container with only `align_of::<T>()` overhead for small stack-only instances.
 
-`WordVec` stores the length and capacity of a container on the heap.
+`WordVec<T, N>` stores the length and capacity of a container on the heap.
 Thus, the heap pointer is always aligned to 2 bytes on most targets,
 i.e. the least significant bit is always zero.
-`WordVec` exploits this knowledge to represent small (stack-only) vecs
+`WordVec<T, N>` exploits this knowledge to represent small (stack-only) vecs
 by storing the length as `1 | (length << 1)` in the first byte (for little-endian targets),
 using the least significant bit to distinguish whether it is a heap pointer or a stack length.
+(As a consequence, `N` must not exceed 127, which is checked by a const assertion)
 
 ## Supported platforms
 

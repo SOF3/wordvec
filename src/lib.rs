@@ -240,6 +240,31 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Returns the full capacity of the allocated buffer, which may be partly uninitialized,
+    /// along with the length of the initialized portion.
+    ///
+    /// This is equivalent to `(slice_from_raw_parts(as_mut_ptr(), cap), len)`.
+    pub fn as_uninit_slice_with_length(&mut self) -> (&mut [MaybeUninit<T>], usize) {
+        match self.0.parse_marker() {
+            ParsedMarker::Small(len) => {
+                // SAFETY: variant indicated by marker
+                let small = unsafe { &mut self.0.small };
+                (&mut small.data[..], usize::from(len))
+            }
+            ParsedMarker::Large => {
+                // SAFETY: variant indicated by marker
+                let large = unsafe { &mut self.0.large };
+                // SAFETY: Large.0 is always a valid reference.
+                let (allocated, data_start) = large.as_allocated_mut();
+                // SAFETY: `allocated.data` is always a valid *uninit* slice pointer of length `allocated.cap`
+                let slice = unsafe {
+                    slice::from_raw_parts_mut(data_start.cast::<MaybeUninit<T>>(), allocated.cap)
+                };
+                (slice, allocated.len)
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         match self.0.parse_marker() {
             ParsedMarker::Small(len) => usize::from(len),
@@ -383,6 +408,80 @@ impl<T, const N: usize> WordVec<T, N> {
         let large = unsafe { Large::new(new_cap, data_slice) };
 
         self.0.large = ManuallyDrop::new(large);
+    }
+
+    /// # Panics
+    /// Panics if `index >= self.len()`.
+    pub fn remove(&mut self, index: usize) -> T {
+        match self.try_remove(index) {
+            Some(v) => v,
+            None => panic!("Cannot remove index {index} from length {}", self.len()),
+        }
+    }
+
+    pub fn try_remove(&mut self, index: usize) -> Option<T> {
+        let old_len = self.len();
+        if index >= old_len {
+            return None;
+        }
+
+        // SAFETY: `old_len > index >= 0`, so `old_len - 1` will not overflow,
+        // thus `old_len - 1 < old_len`.
+        unsafe { self.shrink_len(old_len - 1) }
+
+        let (slice, _) = self.as_uninit_slice_with_length();
+        let mutated_slice = &mut slice[index..old_len];
+        mutated_slice.rotate_left(1);
+        // SAFETY: index < `old_len`, so `mutated_slice` must not be empty.
+        unsafe { Some(mutated_slice.last_mut().unwrap_unchecked().assume_init_read()) }
+    }
+
+    /// # Panics
+    /// Panics if `index >= self.len()`.
+    pub fn swap_remove(&mut self, index: usize) -> T {
+        match self.try_swap_remove(index) {
+            Some(v) => v,
+            None => panic!("Cannot remove index {index} from length {}", self.len()),
+        }
+    }
+
+    pub fn try_swap_remove(&mut self, index: usize) -> Option<T> {
+        let old_len = self.len();
+        if index >= old_len {
+            return None;
+        }
+
+        // SAFETY: `old_len > index >= 0`, so `old_len - 1` will not overflow,
+        // thus `old_len - 1 < old_len`.
+        unsafe { self.shrink_len(old_len - 1) }
+
+        let (slice, _) = self.as_uninit_slice_with_length();
+        // SAFETY: slice[index] and slice[old_len - 1] were previously initialized.
+        // Whichever item ends up at the latter position will no longer be reachable.
+        unsafe {
+            slice.swap(index, old_len - 1);
+            Some(slice[old_len - 1].assume_init_read())
+        }
+    }
+
+    /// # Safety
+    /// `new_len` must not exceed the current length.
+    unsafe fn shrink_len(&mut self, new_len: usize) {
+        debug_assert!(new_len <= self.len());
+        match self.0.parse_marker() {
+            ParsedMarker::Small(_) => {
+                // SAFETY: marker is Small
+                let small = unsafe { &mut self.0.small };
+                // SAFETY: since new_len <= self.len <= 127, (new_len << 1) is still within bounds of u8.
+                small.marker = unsafe { u8::try_from(new_len).unwrap_unchecked() } << 1 | 1;
+            }
+            ParsedMarker::Large => {
+                // SAFETY: marker is Large
+                let large = unsafe { &mut self.0.large };
+                let (allocated, _) = large.as_allocated_mut();
+                allocated.len = new_len;
+            }
+        }
     }
 }
 
