@@ -9,6 +9,7 @@ fn test_from_and_as_slice() {
 
     assert::<1, 0>([]);
     assert::<1, 1>([42]);
+    assert::<1, 2>([42, 55]);
     assert::<2, 0>([]);
     assert::<2, 1>([42]);
     assert::<2, 2>([42, 55]);

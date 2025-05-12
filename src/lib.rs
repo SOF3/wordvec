@@ -2,7 +2,7 @@
 
 extern crate alloc;
 
-use alloc::alloc::{alloc, handle_alloc_error, realloc};
+use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
 use core::alloc::Layout;
 use core::hint::assert_unchecked;
 use core::mem::{ManuallyDrop, MaybeUninit};
@@ -79,25 +79,27 @@ impl<T> Large<T> {
         unsafe { Layout::from_size_align_unchecked(size, align) }
     }
 
-    fn as_allocated(&self) -> &Allocated<T> {
+    fn as_allocated(&self) -> (&Allocated<T>, *const T) {
         // SAFETY: the pointer is always valid as an invariant of this struct.
-        unsafe { self.0.as_ref() }
+        unsafe { (self.0.as_ref(), Allocated::data_start(self.0)) }
     }
 
-    fn as_allocated_mut(&mut self) -> &mut Allocated<T> {
+    fn as_allocated_mut(&mut self) -> (&mut Allocated<T>, *mut T) {
         // SAFETY: the pointer is always valid as an invariant of this struct.
-        unsafe { self.0.as_mut() }
+        // The `data_start` pointer does not alias the `&mut Allocated`
+        // since `Allocated` only contains an empty array.
+        unsafe { (self.0.as_mut(), Allocated::data_start(self.0)) }
     }
 
     fn current_layout(&self) -> Layout {
-        let cap = self.as_allocated().cap;
+        let cap = self.as_allocated().0.cap;
         Self::new_layout(cap)
     }
 
     fn grow(&mut self, min_new_cap: usize) {
         let mut new_cap = min_new_cap;
 
-        let old_cap = self.as_allocated().cap;
+        let old_cap = self.as_allocated().0.cap;
         if let Some(double) = old_cap.checked_mul(2) {
             new_cap = new_cap.max(double);
         }
@@ -112,6 +114,8 @@ impl<T> Large<T> {
         let new_ptr = unsafe { realloc(self.0.as_ptr().cast(), old_layout, new_layout.size()) };
         let Some(new_ptr) = NonNull::new(new_ptr) else { handle_alloc_error(new_layout) };
         self.0 = new_ptr.cast();
+        // SAFETY: the previous `cap` value was initialized to a valid value.
+        unsafe {(*self.0.as_ptr()).cap = new_cap;}
     }
 
     /// Create a new `Large` and move the data from `src` to `dest`.
@@ -125,53 +129,57 @@ impl<T> Large<T> {
         // SAFETY: new_layout never returns a zero layout.
         let ptr = unsafe { alloc(layout) };
         let Some(ptr) = NonNull::new(ptr) else { handle_alloc_error(layout) };
-        let mut ptr = ptr.cast::<Allocated<T>>();
+        let ptr = ptr.cast::<Allocated<T>>();
 
         // SAFETY: `ptr` can be derefed as an `Allocated<T>` since it was just allocated as such.
         unsafe {
-            ptr.write(Allocated::<T> { cap, len: 0, data: [] });
+            ptr.write(Allocated::<T> { cap, len: 0, _data_start: [] });
         }
 
         // SAFETY: The underlying `Allocated` is now initialized with the correct length and
         // capacity.
-        let allocated = unsafe { ptr.as_mut() };
-        // SAFETY: function safety invariant.
         unsafe {
-            allocated.extend(src);
+            Allocated::extend(ptr, src);
         }
 
         Self(ptr)
     }
 }
 
+/// This struct only contains the header (and padding) of the heap allocation.
+/// Due to provenance, `_data_start` cannot be directly converted to a slice reference;
+/// the slice must always be derived from the allocation pointer (`NonNull<Allocated<T>>`)
+/// directly.
 #[repr(C)]
 struct Allocated<T> {
     len:  usize,
     cap:  usize,
-    data: [T; 0], // alignment of T, without the size of T.
+    _data_start: [T; 0], // alignment of T, without the size of T.
 }
 
 impl<T> Allocated<T> {
     /// # Safety
     /// - `src` has the same invariants as [`ptr::drop_in_place`].
-    /// - `self.len + src.len() <= self.cap`
+    /// - `(*this)` must be deref-able to a valid `&mut Self`.
+    /// - `(*this).len + src.len() <= self.cap`
     /// - `src` is invalid after this function returns.
     /// - `src` must not be derived from `self`.
-    unsafe fn extend(&mut self, src: *mut [T]) {
-        let old_len = self.len;
-        self.len += src.len();
+    unsafe fn extend(mut this: NonNull<Self>, src: *mut [T]) {
+        let old_len = unsafe{this.as_ref()}.len;
+        unsafe{this.as_mut()}.len += src.len();
 
         // SAFETY: length of self.data == self.cap >= new self.len >= old_len
-        let dest_start = unsafe {
-            let data_start = self.data.as_mut_ptr();
-            data_start.add(old_len)
-        };
+        let dest_start = unsafe { Self::data_start(this).add(old_len) };
 
         // SAFETY: function safety invariant.
         unsafe {
             let src_start = src.cast::<T>();
             ptr::copy_nonoverlapping(src_start, dest_start, src.len());
         }
+    }
+
+    unsafe fn data_start(this: NonNull<Self>) -> *mut T {
+        unsafe { (&raw mut (*this.as_ptr())._data_start).cast() }
     }
 }
 
@@ -192,9 +200,9 @@ impl<T, const N: usize> WordVec<T, N> {
                 // SAFETY: variant indicated by marker
                 let large = unsafe { &self.0.large };
                 // SAFETY: Large.0 is always a valid reference.
-                let allocated = large.as_allocated();
+                let (allocated, data_start) = large.as_allocated();
                 // SAFETY: `allocated.data` is always a valid slice pointer of length `allocated.len`
-                unsafe { slice::from_raw_parts(allocated.data.as_ptr(), allocated.len) }
+                unsafe { slice::from_raw_parts(data_start, allocated.len) }
             }
         }
     }
@@ -213,9 +221,9 @@ impl<T, const N: usize> WordVec<T, N> {
                 // SAFETY: variant indicated by marker
                 let large = unsafe { &mut self.0.large };
                 // SAFETY: Large.0 is always a valid reference.
-                let allocated = large.as_allocated_mut();
+                let (allocated, data_start) = large.as_allocated_mut();
                 // SAFETY: `allocated.data` is always a valid slice pointer of length `allocated.len`
-                unsafe { slice::from_raw_parts_mut(allocated.data.as_mut_ptr(), allocated.len) }
+                unsafe { slice::from_raw_parts_mut(data_start, allocated.len) }
             }
         }
     }
@@ -226,7 +234,7 @@ impl<T, const N: usize> WordVec<T, N> {
             ParsedMarker::Large => {
                 // SAFETY: variant indicated by marker
                 let large = unsafe { &self.0.large };
-                large.as_allocated().len
+                large.as_allocated().0.len
             }
         }
     }
@@ -239,7 +247,7 @@ impl<T, const N: usize> WordVec<T, N> {
             ParsedMarker::Large => {
                 // SAFETY: variant indicated by marker
                 let large = unsafe { &self.0.large };
-                large.as_allocated().cap
+                large.as_allocated().0.cap
             }
         }
     }
@@ -299,21 +307,19 @@ impl<T, const N: usize> WordVec<T, N> {
     unsafe fn extend_large(&mut self, values: *mut [T]) {
         // SAFETY: function safety invariant
         let large = unsafe { &mut self.0.large };
-        let allocated = large.as_allocated_mut();
-        let new_len = allocated.len.checked_add(values.len()).expect("new length is out of bounds");
-        if new_len > allocated.cap {
+        let (&Allocated { len, cap, ..}, _) = large.as_allocated();
+        let new_len = len.checked_add(values.len()).expect("new length is out of bounds");
+        if new_len > cap {
             large.grow(new_len);
 
-            // SAFETY: Large.0 is a new valid reference after growing.
-            let allocated = large.as_allocated_mut();
             // SAFETY: `large` has grown to at least `new_len`.
             unsafe {
-                allocated.extend(values);
+                Allocated::extend(large.0, values);
             }
         } else {
             // SAFETY: checked in the condition.
             unsafe {
-                allocated.extend(values);
+                Allocated::extend(large.0, values);
             }
         }
     }
@@ -383,15 +389,22 @@ impl<T, const N: usize> Drop for WordVec<T, N> {
                 // SAFETY: variant indicated by marker
                 let large = unsafe { &mut self.0.large };
                 // SAFETY: Large.0 is always a valid reference.
-                let allocated = large.as_allocated_mut();
+                let (allocated, data_start) = large.as_allocated_mut();
                 // SAFETY: `allocated.data` is always a valid slice pointer of length `allocated.len`,
                 // and the destructor is only called once from its owner.
                 unsafe {
                     let slice_ptr =
-                        ptr::slice_from_raw_parts_mut(allocated.data.as_mut_ptr(), allocated.len);
+                        ptr::slice_from_raw_parts_mut(data_start, allocated.len);
                     slice_ptr.drop_in_place();
                 };
+
+                // SAFETY: everything is now cleaned up, the allocation will no longer be used.
+                unsafe { dealloc(large.0.as_ptr().cast(), large.current_layout()); }
             }
         }
     }
 }
+
+// SAFETY: These are equivalent to the safety of `Vec<T>`.
+unsafe impl<T: Send, const N: usize> Send for WordVec<T, N> {}
+unsafe impl<T: Sync, const N: usize> Sync for WordVec<T, N> {}
