@@ -34,6 +34,7 @@ macro_rules! list_benches {
                 small: () => (1..4u16);
                 large: () => (1..14u16);
                 huge: () => (1..1028u16);
+                huge_dyn: () => (Box::new(1..1028u16) as Box<dyn Iterator<Item = u16>>);
             }
 
             push_from_empty(
@@ -43,6 +44,7 @@ macro_rules! list_benches {
                 small: () => (1..4u16);
                 large: () => (1..14u16);
                 huge: () => (1..1028u16);
+                huge_dyn: () => (Box::new(1..1028u16) as Box<dyn Iterator<Item = u16>>);
             }
         }
     };
