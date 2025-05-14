@@ -1,0 +1,53 @@
+name: Benchmark
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  criterion:
+    name: criterion
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain:
+          - nightly
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          default: true
+          toolchain: ${{matrix.toolchain}}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/.cargo
+            **/target/release
+          key: ${{matrix.toolchain}}-${{hashFiles('**/Cargo.lock')}}-criterion
+      - name: Run criterion
+        run: cargo +${{matrix.toolchain}} bench --bench criterion
+  iai:
+    name: iai
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain:
+          - nightly
+    steps:
+      - run: sudo apt-get install -y valgrind
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          default: true
+          toolchain: ${{matrix.toolchain}}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/.cargo
+            **/target/release
+          key: ${{matrix.toolchain}}-${{hashFiles('**/Cargo.lock')}}-iai
+      - name: Run iai
+        run: cargo +${{matrix.toolchain}} bench --bench iai
