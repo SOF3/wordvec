@@ -29,8 +29,10 @@ union Inner<T, const N: usize> {
 
 impl<T, const N: usize> Inner<T, N> {
     const fn assert_generics() {
-        assert!(N <= 127, "N must be less than or equal to 127 to fit in the marker byte");
-        assert!(align_of::<usize>() >= 2, "usize must be aligned to 2 bytes");
+        const {
+            assert!(N <= 127, "N must be less than or equal to 127 to fit in the marker byte");
+            assert!(align_of::<usize>() >= 2, "usize must be aligned to 2 bytes");
+        }
     }
 
     fn parse_marker(&self) -> ParsedMarker {
@@ -587,6 +589,14 @@ impl<T, const N: usize> Extend<T> for WordVec<T, N> {
                 unsafe { self.extend_large_iter(iter) }
             }
         }
+    }
+}
+
+impl<T, const N: usize> FromIterator<T> for WordVec<T, N> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut v = Self::default();
+        v.extend(iter);
+        v
     }
 }
 
