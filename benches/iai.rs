@@ -17,7 +17,7 @@ macro_rules! run_bench {
         paste::paste! {
             fn [<bench_ $module _ $bench_name _ $variant_name>]() {
                 if <impls::$module::Benches as impls::Benches<IaiBlackBox>>::[<has_ $bench_name>]() {
-                    $(let $input_name = $input_value;)*
+                    $(let $input_name = iai::black_box($input_value);)*
 
                     let b = impls::$module::Benches;
                     impls::Benches::<IaiBlackBox>::$bench_name(&b, $($arg),*)
