@@ -17,7 +17,7 @@ use core::{array, cmp, fmt, iter, slice};
 mod tests;
 
 mod polyfill;
-#[allow(clippy::wildcard_imports)]
+#[expect(clippy::wildcard_imports)]
 use polyfill::*;
 
 pub struct WordVec<T, const N: usize>(Inner<T, N>);
@@ -103,7 +103,10 @@ impl<T> Large<T> {
         Self::new_layout(cap)
     }
 
-    fn grow(&mut self, min_new_cap: usize) {
+    /// This function never reads or writes `Allocated.len`.
+    /// This allows the local cache of `len` in `extend_large_iter`
+    /// to remain valid when reallocation occurs during growth.
+    fn grow(&mut self, min_new_cap: usize) -> usize {
         let mut new_cap = min_new_cap;
 
         let old_cap = self.as_allocated().0.cap;
@@ -112,6 +115,7 @@ impl<T> Large<T> {
         }
 
         self.grow_exact(new_cap);
+        new_cap
     }
 
     fn grow_exact(&mut self, new_cap: usize) {
@@ -167,6 +171,8 @@ struct Allocated<T> {
 }
 
 impl<T> Allocated<T> {
+    /// Extend the length of this allocation with the new data.
+    ///
     /// # Safety
     /// - `src` has the same invariants as [`ptr::drop_in_place`].
     /// - `(*this)` must be deref-able to a valid `&mut Self`.
@@ -174,9 +180,19 @@ impl<T> Allocated<T> {
     /// - `src` is invalid after this function returns.
     /// - `src` must not be derived from `self`.
     unsafe fn extend(mut this: NonNull<Self>, src: *mut [T]) {
-        let old_len = unsafe { this.as_ref() }.len;
-        unsafe { this.as_mut() }.len += src.len();
+        let len = unsafe {
+            let this_mut = this.as_mut();
+            let old_len = this_mut.len;
+            this_mut.len = old_len + src.len();
+            old_len
+        };
+        unsafe {
+            Self::extend_data(this, src, len);
+        }
+    }
 
+    /// Like `extend`, but reads the length from a parameter and does not write the new length.
+    unsafe fn extend_data(this: NonNull<Self>, src: *mut [T], old_len: usize) {
         // SAFETY: length of self.data == self.cap >= new self.len >= old_len
         let dest_start = unsafe { Self::data_start(this).add(old_len) };
 
@@ -304,12 +320,12 @@ impl<T, const N: usize> WordVec<T, N> {
                 }
                 let mut values = ManuallyDrop::new([value]);
                 // SAFETY: we have moved to large right above.
-                unsafe { self.extend_large(&mut *values) }
+                unsafe { self.extend_large_slice(&mut *values) }
             }
             ParsedMarker::Large => {
                 let mut values = ManuallyDrop::new([value]);
                 // SAFETY: marker is Large
-                unsafe { self.extend_large(&mut *values) }
+                unsafe { self.extend_large_slice(&mut *values) }
             }
         }
     }
@@ -361,7 +377,7 @@ impl<T, const N: usize> WordVec<T, N> {
     /// # Safety
     /// - The current marker must be `large`.
     /// - `values` has the same invariants as [`ptr::drop_in_place`].
-    unsafe fn extend_large(&mut self, values: *mut [T]) {
+    unsafe fn extend_large_slice(&mut self, values: *mut [T]) {
         // SAFETY: function safety invariant
         let large = unsafe { &mut self.0.large };
         let (&Allocated { len, cap, .. }, _) = large.as_allocated();
@@ -370,7 +386,6 @@ impl<T, const N: usize> WordVec<T, N> {
             large.grow(new_len);
         }
 
-        // SAFETY: checked in the condition.
         unsafe {
             Allocated::extend(large.0, values);
         }
@@ -381,20 +396,52 @@ impl<T, const N: usize> WordVec<T, N> {
     unsafe fn extend_large_iter(&mut self, values: impl Iterator<Item = T>) {
         // SAFETY: function safety invariant
         let large = unsafe { &mut self.0.large };
-        let (&Allocated { len, cap, .. }, _) = large.as_allocated();
+        let (&Allocated { len, mut cap, .. }, _) = large.as_allocated();
 
         let (hint_min, _) = values.size_hint();
         let hint_len = len.checked_add(hint_min).expect("new length out of bounds");
 
         if hint_len > cap {
-            large.grow(hint_len);
+            cap = large.grow(hint_len);
+        }
+
+        let mut new_len = len;
+        let mut values = values.fuse();
+
+        while new_len < cap {
+            // This simple loop allows better optimizations subject to the implementation of
+            // `values`.
+            if let Some(item) = values.next() {
+                new_len += 1; // new_len < cap <= usize::MAX, so this will not overflow
+                unsafe {
+                    let dest = Allocated::<T>::data_start(large.0).add(new_len - 1);
+                    dest.write(item);
+                }
+            } else {
+                // capacity is not full but input is exhausted
+                break;
+            }
         }
 
         for item in values {
-            let mut value = ManuallyDrop::new([item]);
-            unsafe {
-                self.extend_large(&raw mut value[..]);
+            new_len = new_len.checked_add(1).expect("new length is out of bounds");
+            if new_len > cap {
+                cap = large.grow(new_len);
             }
+
+            unsafe {
+                let dest = Allocated::<T>::data_start(large.0).add(new_len - 1);
+                dest.write(item);
+            }
+        }
+
+        // SAFETY:
+        // - large will remain large
+        // - large.0 might have been reallocated, but accessing it through `self` is still correct.
+        // - only one item pushed at a time
+        unsafe {
+            let mut allocated_ptr = self.0.large.0;
+            allocated_ptr.as_mut().len = new_len;
         }
     }
 

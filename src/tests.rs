@@ -1,4 +1,4 @@
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::WordVec;
@@ -74,6 +74,42 @@ fn test_from_and_into_iter() {
     assert::<2, 0>([]);
     assert::<2, 1>([42]);
     assert::<2, 2>([42, 55]);
+}
+
+#[test]
+fn test_from_iter_and_into_iter() {
+    fn assert<const N: usize>(inputs: impl IntoIterator<Item = i32> + Clone) {
+        let wv = WordVec::<i32, N>::from_iter(inputs.clone());
+        let vec: Vec<_> = wv.into_iter().collect();
+        assert_eq!(vec, inputs.into_iter().collect::<Vec<_>>());
+    }
+
+    assert::<1>([]);
+    assert::<1>([42]);
+    assert::<1>([42, 55]);
+    assert::<2>([]);
+    assert::<2>([42]);
+    assert::<2>([42, 55]);
+    assert::<2>([42, 55, 66, 88, 47, 92, 85, 23, 51]);
+}
+
+#[test]
+fn test_from_iter_string_and_into_iter() {
+    fn assert<const N: usize>(inputs: impl IntoIterator<Item = i32, IntoIter: Clone>) {
+        let inputs = inputs.into_iter().map(|i| i.to_string());
+
+        let wv = WordVec::<String, N>::from_iter(inputs.clone());
+        let vec: Vec<_> = wv.into_iter().collect();
+        assert_eq!(vec, inputs.into_iter().collect::<Vec<_>>());
+    }
+
+    assert::<1>([]);
+    assert::<1>([42]);
+    assert::<1>([42, 55]);
+    assert::<2>([]);
+    assert::<2>([42]);
+    assert::<2>([42, 55]);
+    assert::<2>([42, 55, 66, 88, 47, 92, 85, 23, 51]);
 }
 
 #[test]
