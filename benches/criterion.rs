@@ -19,7 +19,7 @@ macro_rules! run_bench {
         if paste::paste!(<impls::$module::Benches as impls::Benches<CriterionBlackBox>>::[<has_ $bench_name>]()) {
             $group.bench_function(BenchmarkId::new(stringify!($variant_name), $impl_name), |b| {
                 b.iter_batched(
-                    || criterion::black_box(($($input_value,)*)),
+                    || ($($input_value,)*),
                     |($($input_key,)*)| {
                         let b = impls::$module::Benches;
                         impls::Benches::<CriterionBlackBox>::$bench_name(&b, $($init_arg),*)
