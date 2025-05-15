@@ -396,31 +396,42 @@ impl<T, const N: usize> WordVec<T, N> {
     unsafe fn extend_large_iter(&mut self, values: impl Iterator<Item = T>) {
         // SAFETY: function safety invariant
         let large = unsafe { &mut self.0.large };
-        let (&Allocated { len, cap, .. }, _) = large.as_allocated();
+        let (&Allocated { len, mut cap, .. }, _) = large.as_allocated();
 
         let (hint_min, _) = values.size_hint();
         let hint_len = len.checked_add(hint_min).expect("new length out of bounds");
 
         if hint_len > cap {
-            large.grow(hint_len);
+            cap = large.grow(hint_len);
         }
 
         let mut new_len = len;
-        let mut cap = cap;
+        let mut values = values.fuse();
+
+        while new_len < cap {
+            // This simple loop allows better optimizations subject to the implementation of
+            // `values`.
+            if let Some(item) = values.next() {
+                new_len += 1; // new_len < cap <= usize::MAX, so this will not overflow
+                unsafe {
+                    let dest = Allocated::<T>::data_start(large.0).add(new_len - 1);
+                    dest.write(item);
+                }
+            } else {
+                // capacity is not full but input is exhausted
+                break;
+            }
+        }
 
         for item in values {
-            let mut value = ManuallyDrop::new([item]);
-
             new_len = new_len.checked_add(1).expect("new length is out of bounds");
             if new_len > cap {
-                cap = unsafe {
-                    large.grow(new_len);
-                    large.0.as_ref().cap
-                };
+                cap = large.grow(new_len);
             }
 
             unsafe {
-                Allocated::extend_data(large.0, &raw mut value[..], new_len - 1);
+                let dest = Allocated::<T>::data_start(large.0).add(new_len - 1);
+                dest.write(item);
             }
         }
 
