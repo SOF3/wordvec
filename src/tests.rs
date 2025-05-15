@@ -77,6 +77,23 @@ fn test_from_and_into_iter() {
 }
 
 #[test]
+fn test_from_iter_and_into_iter() {
+    fn assert<const N: usize>(inputs: impl IntoIterator<Item = i32> + Clone) {
+        let wv = WordVec::<i32, N>::from_iter(inputs.clone());
+        let vec: Vec<_> = wv.into_iter().collect();
+        assert_eq!(vec, inputs.into_iter().collect::<Vec<_>>());
+    }
+
+    assert::<1>([]);
+    assert::<1>([42]);
+    assert::<1>([42, 55]);
+    assert::<2>([]);
+    assert::<2>([42]);
+    assert::<2>([42, 55]);
+    assert::<2>([42, 55, 66, 88, 47, 92, 85, 23, 51]);
+}
+
+#[test]
 fn test_into_iter_drop() {
     fn assert<const N: usize>(inputs: &[&str], explicit_drops: usize) {
         let mut wv = WordVec::<String, N>::default();
