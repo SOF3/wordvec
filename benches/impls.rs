@@ -13,38 +13,52 @@ pub trait BlackBox {
 
 #[allow(unused_macros)]
 macro_rules! list_benches {
-    ($macro:ident) => {
+    ($macro:ident, $blackbox:ident) => {
         $macro! {
             from_exact_array_and_drop(
                 array: [u16; 3],
             ) {
-                exact: () => ([1, 2, 3]);
+                exact: ([1, 2, 3]);
             }
 
             from_array_and_drop[const N: usize](
                 array: [u16; N],
             ) {
-                large: () => ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
-                huge: (input = [3; 1027]) => (input);
+                large: ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+                huge: ([3; 1027]);
             }
 
             from_iter_and_drop(
                 input: impl Iterator<Item = u16>,
             ) {
-                small: () => (1..4u16);
-                large: () => (1..14u16);
-                huge: () => (1..1028u16);
-                huge_dyn: (iter = Box::new(1..1028u16) as Box<dyn Iterator<Item = u16>>) => (iter);
+                empty: (std::iter::empty());
+                small: (1..4u16);
+                large: (1..14u16);
+                huge: (1..1028u16);
+                huge_dyn: (Box::new(1..1028u16) as Box<dyn Iterator<Item = u16>>);
             }
 
             push_from_empty(
                 input: impl Iterator<Item = u16>,
             ) {
-                few: () => (Some(1u16).into_iter());
-                small: () => (1..4u16);
-                large: () => (1..14u16);
-                huge: () => (1..1028u16);
-                huge_dyn: (iter = Box::new(1..1028u16) as Box<dyn Iterator<Item = u16>>) => (iter);
+                few: (Some(1u16).into_iter());
+                small: (1..4u16);
+                large: (1..14u16);
+                huge: (1..1028u16);
+                huge_dyn: (Box::new(1..1028u16) as Box<dyn Iterator<Item = u16>>);
+            }
+
+            remove_first(size: u16) {
+                few: (1);
+                small: (3);
+                large: (14);
+                huge: (1028);
+            }
+
+            remove_second(size: u16) {
+                small: (3);
+                large: (14);
+                huge: (1028);
             }
         }
     };
@@ -59,14 +73,11 @@ macro_rules! decl_benches {
                 $(
                     $param_name:ident: $param_ty:ty
                 ),* $(,)?
-            ) {
+            )
+            {
                 $(
                     $variant_name:ident:
                     (
-                        $(
-                            $input_name:ident = $input_value:expr
-                        ),* $(,)?
-                    ) => (
                         $($arg:expr),* $(,)?
                     );
                 )*
@@ -79,7 +90,7 @@ macro_rules! decl_benches {
                     fn [<has_ $bench_name>]() -> bool { true }
 
                     #[allow(clippy::wrong_self_convention)]
-                    fn $bench_name$(<$($generics)*>)?(&self, $($param_name: $param_ty),*);
+                    fn $bench_name$(<$($generics)*>)?(self, $($param_name: $param_ty),*) -> impl FnOnce();
                 )*
             }
         }
@@ -89,4 +100,4 @@ macro_rules! decl_benches {
 #[allow(unused_imports)]
 pub(crate) use list_benches;
 
-list_benches!(decl_benches);
+list_benches!(decl_benches, B);

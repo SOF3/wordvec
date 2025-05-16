@@ -461,6 +461,7 @@ impl<T, const N: usize> WordVec<T, N> {
 
     /// # Panics
     /// Panics if `index >= self.len()`.
+    #[inline]
     pub fn remove(&mut self, index: usize) -> T {
         match self.try_remove(index) {
             Some(v) => v,
@@ -468,18 +469,11 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    #[inline]
     pub fn try_remove(&mut self, index: usize) -> Option<T> {
-        let old_len = self.len();
-        if index >= old_len {
-            return None;
-        }
+        let slice = self.remove_last_uninit(index)?;
 
-        // SAFETY: `old_len > index >= 0`, so `old_len - 1` will not overflow,
-        // thus `old_len - 1 < old_len`.
-        unsafe { self.shrink_len(old_len - 1) }
-
-        let (slice, _) = self.as_uninit_slice_with_length();
-        let mutated_slice = &mut slice[index..old_len];
+        let mutated_slice = &mut slice[index..];
         mutated_slice.rotate_left(1);
         // SAFETY: index < `old_len`, so `mutated_slice` must not be empty.
         unsafe { Some(mutated_slice.last_mut().unwrap_unchecked().assume_init_read()) }
@@ -495,40 +489,54 @@ impl<T, const N: usize> WordVec<T, N> {
     }
 
     pub fn try_swap_remove(&mut self, index: usize) -> Option<T> {
-        let old_len = self.len();
-        if index >= old_len {
-            return None;
-        }
+        let slice = self.remove_last_uninit(index)?;
 
-        // SAFETY: `old_len > index >= 0`, so `old_len - 1` will not overflow,
-        // thus `old_len - 1 < old_len`.
-        unsafe { self.shrink_len(old_len - 1) }
-
-        let (slice, _) = self.as_uninit_slice_with_length();
-        // SAFETY: slice[index] and slice[old_len - 1] were previously initialized.
+        // SAFETY: slice[index] and slice.last() were previously initialized.
         // Whichever item ends up at the latter position will no longer be reachable.
         unsafe {
-            slice.swap(index, old_len - 1);
-            Some(slice[old_len - 1].assume_init_read())
+            slice.swap(index, slice.len() - 1);
+            Some(slice.last_mut().unwrap_unchecked().assume_init_read())
         }
     }
 
-    /// # Safety
-    /// `new_len` must not exceed the current length.
-    unsafe fn shrink_len(&mut self, new_len: usize) {
-        debug_assert!(new_len <= self.len());
+    /// Reduces the length by one.
+    /// Returns `None` if the vector length is less than or equal to `len_gt`.
+    ///
+    /// `len_gt` is effectively the minimum new length after this function returns.
+    ///
+    /// This method cannot cause UB, but it will leak memory
+    /// if the last item in the returned slice is not dropped.
+    ///
+    /// Returns the *original* initialized slice before removing the last item.
+    fn remove_last_uninit(&mut self, len_gt: usize) -> Option<&mut [MaybeUninit<T>]> {
         match self.0.parse_marker() {
-            ParsedMarker::Small(_) => {
+            ParsedMarker::Small(old_len) => {
                 // SAFETY: marker is Small
                 let small = unsafe { &mut self.0.small };
+
+                if usize::from(old_len) <= len_gt {
+                    return None;
+                }
+
                 // SAFETY: since new_len <= self.len <= 127, (new_len << 1) is still within bounds of u8.
-                small.marker = unsafe { u8::try_from(new_len).unwrap_unchecked() } << 1 | 1;
+                small.marker = unsafe { small.marker.unchecked_sub(2) };
+
+                Some(&mut small.data[..usize::from(old_len)])
             }
             ParsedMarker::Large => {
                 // SAFETY: marker is Large
                 let large = unsafe { &mut self.0.large };
-                let (allocated, _) = large.as_allocated_mut();
+                let (allocated, data_start) = large.as_allocated_mut();
+
+                let old_len = allocated.len;
+                let Some(new_len) = old_len.checked_sub(1) else { return None };
                 allocated.len = new_len;
+
+                // SAFETY: `allocated.data` is always a valid *uninit* slice pointer of length `allocated.cap`
+                let slice = unsafe {
+                    slice::from_raw_parts_mut(data_start.cast::<MaybeUninit<T>>(), old_len)
+                };
+                Some(slice)
             }
         }
     }

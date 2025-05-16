@@ -10,17 +10,12 @@ macro_rules! run_bench {
     (
         $module:ident;
         $bench_name:ident, $variant_name:ident;
-        $($input_name:expr,)*;
-        $($input_value:expr,)*;
         $($arg:expr,)*;
     ) => {
         paste::paste! {
             fn [<bench_ $module _ $bench_name _ $variant_name>]() {
                 if <impls::$module::Benches as impls::Benches<IaiBlackBox>>::[<has_ $bench_name>]() {
-                    $(let $input_name = iai::black_box($input_value);)*
-
-                    let b = impls::$module::Benches;
-                    impls::Benches::<IaiBlackBox>::$bench_name(&b, $($arg),*)
+                    impls::Benches::<IaiBlackBox>::$bench_name(impls::$module::Benches, $($arg),*)();
                 }
             }
         }
@@ -36,14 +31,11 @@ macro_rules! run_benches {
                 $(
                     $param_name:ident: $param_ty:ty
                 ),* $(,)?
-            ) {
+            )
+            {
                 $(
                     $variant_name:ident:
                     (
-                        $(
-                            $input_name:ident = $input_value:expr
-                        ),* $(,)?
-                    ) => (
                         $($arg:expr),* $(,)?
                     );
                 )*
@@ -56,32 +48,24 @@ macro_rules! run_benches {
                     run_bench! {
                         std_vec;
                         $bench_name, $variant_name;
-                        $($input_name,)*;
-                        $($input_value,)*;
                         $($arg,)*;
                     }
 
                     run_bench! {
                         smallvec;
                         $bench_name, $variant_name;
-                        $($input_name,)*;
-                        $($input_value,)*;
                         $($arg,)*;
                     }
 
                     run_bench! {
                         wordvec;
                         $bench_name, $variant_name;
-                        $($input_name,)*;
-                        $($input_value,)*;
                         $($arg,)*;
                     }
 
                     run_bench! {
                         thinvec;
                         $bench_name, $variant_name;
-                        $($input_name,)*;
-                        $($input_value,)*;
                         $($arg,)*;
                     }
                 )*
@@ -97,4 +81,4 @@ macro_rules! run_benches {
     }
 }
 
-impls::list_benches!(run_benches);
+impls::list_benches!(run_benches, IaiBlackbox);

@@ -11,19 +11,16 @@ impl impls::BlackBox for CriterionBlackBox {
 macro_rules! run_bench {
     (
         $impl_name:literal, $module:ident, $group:ident;
-        $bench_name:ident, $variant_name:ident;
-        $($input_key:ident,)*;
-        $($input_value:expr,)*;
+        $bench_name:ident, $variant_name:ident, $vec:path;
         $($init_arg:expr,)*;
     ) => {
         if paste::paste!(<impls::$module::Benches as impls::Benches<CriterionBlackBox>>::[<has_ $bench_name>]()) {
             $group.bench_function(BenchmarkId::new(stringify!($variant_name), $impl_name), |b| {
                 b.iter_batched(
-                    || ($($input_value,)*),
-                    |($($input_key,)*)| {
-                        let b = impls::$module::Benches;
-                        impls::Benches::<CriterionBlackBox>::$bench_name(&b, $($init_arg),*)
+                    || {
+                        impls::Benches::<CriterionBlackBox>::$bench_name(impls::$module::Benches, $($init_arg),*)
                     },
+                    |f| f(),
                     BatchSize::SmallInput,
                 );
             });
@@ -40,14 +37,11 @@ macro_rules! run_benches {
                 $(
                     $param_name:ident: $param_ty:ty
                 ),* $(,)?
-            ) {
+            )
+            {
                 $(
                     $variant_name:ident:
                     (
-                        $(
-                            $input_name:ident = $input_value:expr
-                        ),* $(,)?
-                    ) => (
                         $($arg:expr),* $(,)?
                     );
                 )*
@@ -62,33 +56,25 @@ macro_rules! run_benches {
                     $(
                         run_bench! {
                             "std::vec", std_vec, group;
-                            $bench_name, $variant_name;
-                            $($input_name,)*;
-                            $($input_value,)*;
+                            $bench_name, $variant_name, ::std::vec::Vec<u16>;
                             $($arg,)*;
                         }
 
                         run_bench! {
                             "smallvec", smallvec, group;
-                            $bench_name, $variant_name;
-                            $($input_name,)*;
-                            $($input_value,)*;
+                            $bench_name, $variant_name, ::smallvec::SmallVec<u16>;
                             $($arg,)*;
                         }
 
                         run_bench! {
                             "wordvec", wordvec, group;
-                            $bench_name, $variant_name;
-                            $($input_name,)*;
-                            $($input_value,)*;
+                            $bench_name, $variant_name, ::wordvec::WordVec<u16>;
                             $($arg,)*;
                         }
 
                         run_bench! {
                             "thinvec", thinvec, group;
-                            $bench_name, $variant_name;
-                            $($input_name,)*;
-                            $($input_value,)*;
+                            $bench_name, $variant_name, ::thin_vec::ThinVec<u16>;
                             $($arg,)*;
                         }
                     )*
@@ -104,6 +90,6 @@ macro_rules! run_benches {
     }
 }
 
-impls::list_benches!(run_benches);
+impls::list_benches!(run_benches, CriterionBlackbox);
 
 criterion_main!(criterion_benches);
