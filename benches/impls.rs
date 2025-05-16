@@ -69,7 +69,8 @@ macro_rules! list_benches {
             }
 
             inc_many_flat_pattern(pattern: &[u16], vec_count: usize) {
-                quad: (&[0, 3, 14, 1027], 1000);
+                all_small: (&[0, 2, 3, 1], 1000);
+                mixed: (&[0, 14, 3, 1027], 1000);
             }
         }
     };

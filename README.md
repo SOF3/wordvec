@@ -7,7 +7,7 @@
 [![GitHub](https://img.shields.io/github/last-commit/SOF3/wordvec)](https://github.com/SOF3/wordvec)
 [![GitHub](https://img.shields.io/github/stars/SOF3/wordvec?style=social)](https://github.com/SOF3/wordvec)
 
-A [thin](https://crates.io/crates/thin-vec) and [small](https://crates.io/crates/smallvec) vector
+A [thin][thinvec] and [small][smallvec] vector
 that can fit data into a single `usize`.
 
 ## Memory layout
@@ -52,7 +52,7 @@ which distinguishes it from the inlined layout.
 
 Although the technical limit is `N <= 127`,
 it is not meaningful to set `N` such that `align_of::<T>() + N * size_of::<T>()` exceeds 24;
-WordVec has no advantage over [SmallVec](https://crates.io/crates/smallvec) if it cannot pack into a smaller struct.
+WordVec has no advantage over [SmallVec][smallvec] if it cannot pack into a smaller struct.
 
 Thin vectors are significantly (several times) slower than conventional vectors
 since reading the length and capacity usually involves accessing memory out of active cache.
@@ -72,3 +72,33 @@ Targets violating the following requirements will lead to compile error:
 
 - Little-endian only
 - `align_of::<usize>()` must be at least 2 bytes.
+
+## Benchmarks
+
+Full criterion benchmark report generated from GitHub CI
+can be found on [GitHub pages][bench-criterion].
+Note that GitHub CI runners are subject to many uncontrolled noise sources
+and may not be very reliable.
+You may reproduce the benchmarks yourself by running `cargo bench --bench criterion`,
+or check the [valgrind-based analysis][bench-iai] instead.
+
+The benchmarks compare `std::vec`, 
+
+The general observation is that WordVec performance is comparable to SmallVec, but:
+- is slower with operations on a *single* small vector (presumably due to bitshifting the length byte)
+- is sometimes slower with operations on large vectors due to thinness (reading/writing length/capacity from heap)
+- is faster with opreations on *many* small vectors due to more efficient memory (fewer RAM accesses)
+
+## Vec feature parity
+
+WordVec is a new project to experiment on new semantics.
+Currently only the basic features required to produce meaningful benchmarks are implemented,
+but **all features from `std::vec` shall be implemented** in this library eventually.
+Pull requests are welcome to align WordVec functionality with `std::vec` or smallvec;
+I do not have bandwidth to implement all those functions but I am happy to review such contributions.
+
+[smallvec]: https://docs.rs/smallvec
+[thinvec]: https://docs.rs/thin-vec
+[std-vec]: https://doc.rust-lang.org/std/vec/struct.Vec.html
+[bench-criterion]: https://sof3.github.io/wordvec/report/index.html
+[bench-iai]: https://sof3.github.io/wordvec/iai/summary.txt

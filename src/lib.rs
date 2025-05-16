@@ -1,3 +1,31 @@
+//! A [thin][thinvec] and [small][smallvec] vector
+//! that can fit data into a single `usize`.
+//!
+//! See [the readme on GitHub][git-repo]
+//! for detailed explanation of the memory layout.
+//!
+//! ## When to use
+//!
+//! Although the technical limit is `N <= 127`,
+//! it is not meaningful to set `N` such that `align_of::<T>() + N * size_of::<T>()` exceeds 24;
+//! `WordVec` has no advantage over [`SmallVec`][smallvec] if it cannot pack into a smaller struct.
+//!
+//! Thin vectors are significantly (several times) slower than conventional vectors
+//! since reading the length and capacity usually involves accessing memory out of active cache.
+//! Thus, heap layout is supposed to be the cold path.
+//! In other words, `WordVec` is basically
+//! "length should never exceed `N`, but behavior is still correct when it exceeds".
+//!
+//! Since the length encoding in the inlined layout is indirect (involves a bitshift),
+//! raw inlined access also tends to be slower in `WordVec` compared to `SmallVec`,
+//! as a tradeoff of reduced memory footprint of each vector alone.
+//! This may get handy in scenarios with a large array of small vectors,
+//! e.g. as an ECS component.
+//!
+//! [thinvec]: https://docs.rs/thin-vec
+//! [smallvec]: https://docs.rs/smallvec
+//! [git-repo]: https://github.com/SOF3/wordvec
+
 #![no_std]
 #![warn(clippy::pedantic)]
 
@@ -9,7 +37,7 @@ use core::hash::{self, Hash};
 use core::hint::assert_unchecked;
 use core::iter::FusedIterator;
 use core::mem::{ManuallyDrop, MaybeUninit, needs_drop};
-use core::ops::{Deref, DerefMut};
+use core::ops::{self, Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::{array, cmp, fmt, iter, slice};
 
@@ -17,9 +45,15 @@ use core::{array, cmp, fmt, iter, slice};
 mod tests;
 
 mod polyfill;
-#[expect(clippy::wildcard_imports)]
+#[allow(clippy::wildcard_imports)]
 use polyfill::*;
 
+/// A thin and small vector that can fit data into a single `usize`.
+///
+/// `N` must be less than or equal to 127.
+/// It is advised that `size_of::<T>() * N + align_of::<T>()` does not exceed 20 bytes.
+///
+/// See the [readme](https://github.com/SOF3/wordvec) for more information.
 pub struct WordVec<T, const N: usize>(Inner<T, N>);
 
 union Inner<T, const N: usize> {
@@ -213,9 +247,11 @@ impl<T> Allocated<T> {
 }
 
 impl<T, const N: usize> WordVec<T, N> {
+    /// Creates an empty vector.
     #[must_use]
     pub fn new() -> Self { Self::default() }
 
+    /// Returns an immutable slice of all initialized data.
     pub fn as_slice(&self) -> &[T] {
         match self.0.parse_marker() {
             ParsedMarker::Small(len) => {
@@ -237,6 +273,7 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Returns a mutable slice of all initialized data.
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         match self.0.parse_marker() {
             ParsedMarker::Small(len) => {
@@ -283,6 +320,7 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Returns the number of items in this vector.
     pub fn len(&self) -> usize {
         match self.0.parse_marker() {
             ParsedMarker::Small(len) => usize::from(len),
@@ -294,8 +332,19 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Returns whether the vector is empty.
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
+    /// Returns the capacity of this vector.
+    ///
+    /// Capacity is always `N` when the inlined layout is used.
+    /// When the heap layout is used, `capacity` returns the maximum number of items
+    /// that can be stored in this vector without reallocating.
+    ///
+    /// Capacity only grows when length exceeds the current capacity,
+    /// so `capacity()` is never less than `N`.
+    /// Nevertheless, the length may shrink without reducing capacity,
+    /// so `len() <= N` does **not** imply `capacity() == N`.
     pub fn capacity(&self) -> usize {
         match self.0.parse_marker() {
             ParsedMarker::Small(_) => N,
@@ -307,6 +356,7 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Pushes an item to the end of this vector.
     pub fn push(&mut self, value: T) {
         match self.0.parse_marker() {
             ParsedMarker::Small(len) if usize::from(len) < N => {
@@ -459,6 +509,11 @@ impl<T, const N: usize> WordVec<T, N> {
         self.0.large = ManuallyDrop::new(large);
     }
 
+    /// Removes the item at index `index`,
+    /// shifting all subsequent items forward.
+    ///
+    /// This is an O(n) operation.
+    ///
     /// # Panics
     /// Panics if `index >= self.len()`.
     #[inline]
@@ -469,6 +524,8 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Like [`remove`](Self::remove),
+    /// but returns `None` instead of panicking if `index` is out of bounds.
     #[inline]
     pub fn try_remove(&mut self, index: usize) -> Option<T> {
         let slice = self.remove_last_uninit(index)?;
@@ -479,6 +536,11 @@ impl<T, const N: usize> WordVec<T, N> {
         unsafe { Some(mutated_slice.last_mut().unwrap_unchecked().assume_init_read()) }
     }
 
+    /// Removes the item at index `index`,
+    /// moving the last item behind (if any) to its original position.
+    ///
+    /// This is an O(1) operation and changes the order.
+    ///
     /// # Panics
     /// Panics if `index >= self.len()`.
     pub fn swap_remove(&mut self, index: usize) -> T {
@@ -488,6 +550,8 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Like [`swap_remove`](Self::swap_remove),
+    /// but returns `None` instead of panicking if `index` is out of bounds.
     pub fn try_swap_remove(&mut self, index: usize) -> Option<T> {
         let slice = self.remove_last_uninit(index)?;
 
@@ -529,7 +593,11 @@ impl<T, const N: usize> WordVec<T, N> {
                 let (allocated, data_start) = large.as_allocated_mut();
 
                 let old_len = allocated.len;
-                let Some(new_len) = old_len.checked_sub(1) else { return None };
+                if old_len <= len_gt {
+                    return None;
+                }
+
+                let new_len = old_len - 1; // this never overflows since `old_len > len_gt >= 0`
                 allocated.len = new_len;
 
                 // SAFETY: `allocated.data` is always a valid *uninit* slice pointer of length `allocated.cap`
@@ -662,11 +730,29 @@ impl<T: fmt::Debug, const N: usize> fmt::Debug for WordVec<T, N> {
 impl<T, const N: usize> Deref for WordVec<T, N> {
     type Target = [T];
 
-    fn deref(&self) -> &Self::Target { self.as_slice() }
+    fn deref(&self) -> &[T] { self.as_slice() }
 }
 
 impl<T, const N: usize> DerefMut for WordVec<T, N> {
-    fn deref_mut(&mut self) -> &mut Self::Target { self.as_mut_slice() }
+    fn deref_mut(&mut self) -> &mut [T] { self.as_mut_slice() }
+}
+
+impl<T, const N: usize, Idx> ops::Index<Idx> for WordVec<T, N>
+where
+    [T]: ops::Index<Idx>,
+{
+    type Output = <[T] as ops::Index<Idx>>::Output;
+
+    fn index(&self, index: Idx) -> &Self::Output { self.as_slice().index(index) }
+}
+
+impl<T, const N: usize, Idx> ops::IndexMut<Idx> for WordVec<T, N>
+where
+    [T]: ops::IndexMut<Idx>,
+{
+    fn index_mut(&mut self, index: Idx) -> &mut Self::Output {
+        self.as_mut_slice().index_mut(index)
+    }
 }
 
 impl<T: PartialEq, const N: usize> PartialEq for WordVec<T, N> {
@@ -726,6 +812,7 @@ impl<T, const N: usize> IntoIterator for WordVec<T, N> {
     }
 }
 
+/// Implements [`IntoIterator`] for [`WordVec`].
 pub struct IntoIter<T, const N: usize>(IntoIterInner<T, N>);
 
 enum IntoIterInner<T, const N: usize> {
