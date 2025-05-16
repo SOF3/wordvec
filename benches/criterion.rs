@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
 mod impls;
@@ -15,6 +17,7 @@ macro_rules! run_bench {
         $($init_arg:expr,)*;
     ) => {
         if paste::paste!(<impls::$module::Benches as impls::Benches<CriterionBlackBox>>::[<has_ $bench_name>]()) {
+            $group.measurement_time(Duration::from_secs(10));
             $group.bench_function(BenchmarkId::new(stringify!($variant_name), $impl_name), |b| {
                 b.iter_batched(
                     || {

@@ -52,13 +52,24 @@ macro_rules! list_benches {
                 few: (1);
                 small: (3);
                 large: (14);
-                huge: (1028);
+                huge: (1027);
             }
 
             remove_second(size: u16) {
                 small: (3);
                 large: (14);
-                huge: (1028);
+                huge: (1027);
+            }
+
+            inc_many_flat(each_size: u16, vec_count: usize) {
+                empty: (0, 1000);
+                small: (3, 1000);
+                large: (14, 1000);
+                huge: (1027, 1000);
+            }
+
+            inc_many_flat_pattern(pattern: &[u16], vec_count: usize) {
+                quad: (&[0, 3, 14, 1027], 1000);
             }
         }
     };

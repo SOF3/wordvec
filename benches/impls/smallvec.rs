@@ -56,4 +56,32 @@ impl<B: BlackBox> super::Benches<B> for Benches {
             B::black_box(v);
         }
     }
+
+    fn inc_many_flat(self, each_size: u16, vec_count: usize) -> impl FnOnce() {
+        let mut vecs: Vec<Shorts> = (0..vec_count)
+            .map(|vec_index| {
+                (0..each_size).map(|item_index| (vec_index as u16) ^ item_index).collect()
+            })
+            .collect();
+        move || {
+            for shorts in &mut vecs {
+                shorts.iter_mut().for_each(|s| *s += 1);
+            }
+        }
+    }
+
+    fn inc_many_flat_pattern(self, pattern: &[u16], vec_count: usize) -> impl FnOnce() {
+        let mut vecs: Vec<Shorts> = (0..vec_count)
+            .flat_map(|pattern_index| {
+                pattern.iter().copied().map(move |each_size| {
+                    (0..each_size).map(|item_index| (pattern_index as u16) ^ item_index).collect()
+                })
+            })
+            .collect();
+        move || {
+            for shorts in &mut vecs {
+                shorts.iter_mut().for_each(|s| *s += 1);
+            }
+        }
+    }
 }
