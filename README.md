@@ -87,7 +87,7 @@ The benchmarks compare `std::vec`,
 The general observation is that WordVec performance is comparable to SmallVec, but:
 - is slower with operations on a *single* small vector (presumably due to bitshifting the length byte)
 - is sometimes slower with operations on large vectors due to thinness (reading/writing length/capacity from heap)
-- is faster with opreations on *many* small vectors due to more efficient memory (fewer RAM accesses)
+- is sometimes faster with operations on *many* small vectors due to more efficient memory (fewer RAM accesses)
 
 ## Vec feature parity
 
