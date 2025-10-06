@@ -320,7 +320,8 @@ impl<T, const N: usize> WordVec<T, N> {
     /// Returns the full capacity of the allocated buffer, which may be partly uninitialized,
     /// along with the length of the initialized portion.
     ///
-    /// This is equivalent to `(slice_from_raw_parts(as_mut_ptr(), cap), len)`.
+    /// This is equivalent to `(slice_from_raw_parts(as_mut_ptr(), cap), len)`,
+    /// but with the correct provenance since `as_mut_ptr` only returns provenance up to `len`.
     pub fn as_uninit_slice_with_length(&mut self) -> (&mut [MaybeUninit<T>], usize) {
         match self.0.parse_marker() {
             ParsedMarker::Small(len) => {
@@ -424,7 +425,8 @@ impl<T, const N: usize> WordVec<T, N> {
             );
         }
 
-        let new_len = (small.marker >> 1) + u8::try_from(values.len()).unwrap();
+        let new_len =
+            (small.marker >> 1) + u8::try_from(values.len()).expect("values.len() <= N <= 127");
         small.marker = (new_len << 1) | 1;
     }
 
@@ -631,6 +633,57 @@ impl<T, const N: usize> WordVec<T, N> {
             }
         }
     }
+
+    /// Clears the vector, dropping all items.
+    ///
+    /// Does not change the capacity.
+    pub fn clear(&mut self) {
+        // SAFETY: 0 <= self.len() is always true.
+        let truncated = unsafe { self.decrease_len(0) };
+        // SAFETY: truncated is no longer used after decreasing length.
+        unsafe {
+            slice_assume_init_drop(truncated);
+        }
+    }
+
+    /// Decreases the length to `new_len` and returns the slice of truncated data.
+    ///
+    /// # Safety
+    /// `new_len` must be less than or equal to `self.len()`.
+    unsafe fn decrease_len(&mut self, new_len: usize) -> &mut [MaybeUninit<T>] {
+        let old_len = self.len();
+        debug_assert!(new_len <= old_len);
+
+        // SAFETY: new_len <= old_len <= self.cap().
+        unsafe {
+            self.set_len(new_len);
+        }
+
+        let (capacity_slice, _) = self.as_uninit_slice_with_length();
+        &mut capacity_slice[new_len..old_len]
+    }
+
+    /// Sets the length to `new_len`.
+    ///
+    /// # Safety
+    /// - `new_len` must be less than or equal to `self.cap()`.
+    /// - If `new_len >= self.len()`,
+    ///   the new items must be initialized before calling this function.
+    unsafe fn set_len(&mut self, new_len: usize) {
+        match self.0.parse_marker() {
+            ParsedMarker::Small(_) => {
+                // SAFETY: marker is Small
+                let small = unsafe { &mut self.0.small };
+                small.marker = (u8::try_from(new_len).expect("new_len <= N <= 127") << 1) | 1;
+            }
+            ParsedMarker::Large => {
+                // SAFETY: marker is Large
+                let large = unsafe { &mut self.0.large };
+                let (allocated, _) = large.as_allocated_mut();
+                allocated.len = new_len;
+            }
+        }
+    }
 }
 
 impl<T, const N: usize> Default for WordVec<T, N> {
@@ -656,7 +709,7 @@ impl<T, const LENGTH: usize, const N: usize> From<[T; LENGTH]> for WordVec<T, N>
 
             Self(Inner {
                 small: ManuallyDrop::new(Small {
-                    marker: u8::try_from(LENGTH << 1).unwrap() | 1,
+                    marker: u8::try_from(LENGTH << 1).expect("LENGTH * 2 <= N * 2 <= 254") | 1,
                     data,
                 }),
             })

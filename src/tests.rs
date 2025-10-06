@@ -1,5 +1,6 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use crate::WordVec;
 
@@ -9,6 +10,15 @@ fn assert_size() {
     assert_eq!(size_of::<WordVec<i32, 1>>(), 8);
     assert_eq!(size_of::<WordVec<i16, 3>>(), 8);
     assert_eq!(size_of::<WordVec<i8, 7>>(), 8);
+}
+
+struct AssertDrop<'a> {
+    _string: String,
+    counter: &'a Cell<usize>,
+}
+
+impl Drop for AssertDrop<'_> {
+    fn drop(&mut self) { self.counter.set(self.counter.get() + 1); }
 }
 
 #[test]
@@ -142,21 +152,33 @@ fn test_from_iter_string_and_into_iter() {
 #[test]
 fn test_into_iter_drop() {
     fn assert<const N: usize>(inputs: &[&str], explicit_drops: usize) {
-        let mut wv = WordVec::<String, N>::default();
+        let counter = Cell::new(0);
+
+        let mut wv = WordVec::<AssertDrop, N>::default();
 
         for &input in inputs {
-            wv.push(input.into());
+            wv.push(AssertDrop { _string: input.into(), counter: &counter });
         }
 
+        assert_eq!(counter.get(), 0);
+
         let mut iter = wv.into_iter();
+        assert_eq!(counter.get(), 0);
+
         for _ in 0..explicit_drops {
             iter.next().unwrap();
         }
+        assert_eq!(counter.get(), explicit_drops);
 
         drop(iter);
+        assert_eq!(counter.get(), inputs.len());
     }
 
-    assert::<1>(&["a", "b", "c", "d"], 2);
+    assert::<8>(&["a", "b", "c", "d", "e"], 0);
+    assert::<8>(&["a", "b", "c", "d", "e"], 2);
+    assert::<1>(&["a", "b", "c", "d", "e"], 0);
+    assert::<1>(&["a", "b", "c", "d", "e"], 2);
+    assert::<1>(&["a", "b", "c", "d", "e"], 3);
 }
 
 #[test]
@@ -197,4 +219,26 @@ fn test_swap_remove_large() {
     assert_eq!(wv.as_slice(), &[5, 4, 3]);
 
     assert!(wv.try_swap_remove(3).is_none());
+}
+
+#[test]
+fn test_clear() {
+    fn assert<const N: usize>(input: &[&str], cap: usize) {
+        let counter = Cell::new(0);
+        let mut wv = WordVec::<AssertDrop, N>::with_capacity(cap);
+        wv.extend(input.iter().map(|&s| AssertDrop { _string: s.into(), counter: &counter }));
+
+        assert_eq!(wv.len(), input.len());
+        assert_eq!(wv.capacity(), cap);
+        assert_eq!(counter.get(), 0);
+
+        wv.clear();
+
+        assert_eq!(wv.len(), 0);
+        assert_eq!(wv.capacity(), cap);
+        assert_eq!(counter.get(), input.len());
+    }
+
+    assert::<4>(&["a", "b", "c"], 4);
+    assert::<2>(&["a", "b", "c"], 4);
 }
