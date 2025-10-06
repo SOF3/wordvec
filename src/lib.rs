@@ -165,12 +165,25 @@ impl<T> Large<T> {
         }
     }
 
-    /// Create a new `Large` and move the data from `src` to `dest`.
+    /// Create a new `Large` with a new allocation,
+    /// and move the data from `src` to the new allocation.
     ///
     /// # Safety
     /// - `src` has the same invariants as [`ptr::drop_in_place`].
     /// - The data behind `src` is invalid after this function returns.
     unsafe fn new(cap: usize, src: *mut [T]) -> Self {
+        let this = Self::new_empty(cap);
+
+        // SAFETY: The underlying `Allocated` is now initialized with the correct capacity.
+        unsafe {
+            Allocated::extend(this.0, src);
+        }
+
+        this
+    }
+
+    /// Create a new `Large` with a new allocation and zero length.
+    fn new_empty(cap: usize) -> Self {
         let layout = Self::new_layout(cap);
 
         // SAFETY: new_layout never returns a zero layout.
@@ -181,12 +194,6 @@ impl<T> Large<T> {
         // SAFETY: `ptr` can be derefed as an `Allocated<T>` since it was just allocated as such.
         unsafe {
             ptr.write(Allocated::<T> { cap, len: 0, data_start: [] });
-        }
-
-        // SAFETY: The underlying `Allocated` is now initialized with the correct length and
-        // capacity.
-        unsafe {
-            Allocated::extend(ptr, src);
         }
 
         Self(ptr)
@@ -212,7 +219,7 @@ impl<T> Allocated<T> {
     /// - `(*this)` must be deref-able to a valid `&mut Self`.
     /// - `(*this).len + src.len() <= self.cap`
     /// - `src` is invalid after this function returns.
-    /// - `src` must not be derived from `self`.
+    /// - `src` must not be derived from `this`.
     unsafe fn extend(mut this: NonNull<Self>, src: *mut [T]) {
         let len = unsafe {
             let this_mut = this.as_mut();
@@ -250,6 +257,21 @@ impl<T, const N: usize> WordVec<T, N> {
     /// Creates an empty vector.
     #[must_use]
     pub fn new() -> Self { Self::default() }
+
+    /// Creates an empty vector with the specified capacity.
+    ///
+    /// The resultant capacity is actually `max(N, cap)`.
+    #[must_use]
+    pub fn with_capacity(cap: usize) -> Self {
+        Inner::<T, N>::assert_generics();
+
+        if cap <= N {
+            Self::default()
+        } else {
+            let large = Large::new_empty(cap);
+            Self(Inner { large: ManuallyDrop::new(large) })
+        }
+    }
 
     /// Returns an immutable slice of all initialized data.
     pub fn as_slice(&self) -> &[T] {
@@ -497,6 +519,7 @@ impl<T, const N: usize> WordVec<T, N> {
 
     /// # Safety
     /// - The current marker must be `small`
+    /// - `new_cap` must be greater than or equal to `self.len()`.
     unsafe fn move_small_to_large(&mut self, new_cap: usize) {
         // SAFETY: function safety invariant
         let small = unsafe { &mut self.0.small };

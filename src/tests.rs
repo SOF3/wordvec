@@ -27,6 +27,32 @@ fn test_from_and_as_slice() {
 }
 
 #[test]
+fn test_with_capacity() {
+    assert_eq!(WordVec::<i32, 2>::with_capacity(0).capacity(), 2);
+    assert_eq!(WordVec::<i32, 2>::with_capacity(1).capacity(), 2);
+    assert_eq!(WordVec::<i32, 2>::with_capacity(2).capacity(), 2);
+    assert_eq!(WordVec::<i32, 2>::with_capacity(3).capacity(), 3);
+
+    let mut wv = WordVec::<i32, 2>::with_capacity(3);
+
+    wv.push(11);
+    assert_eq!(wv.len(), 1);
+    assert_eq!(wv.capacity(), 3);
+
+    wv.push(12);
+    assert_eq!(wv.len(), 2);
+    assert_eq!(wv.capacity(), 3);
+
+    wv.push(13);
+    assert_eq!(wv.len(), 3);
+    assert_eq!(wv.capacity(), 3);
+
+    wv.push(14);
+    assert_eq!(wv.len(), 4);
+    assert_eq!(wv.capacity(), 6);
+}
+
+#[test]
 fn test_push() {
     let mut wv = WordVec::<i32, 2>::new();
     wv.push(42);
