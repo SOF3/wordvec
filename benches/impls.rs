@@ -72,6 +72,21 @@ macro_rules! list_benches {
                 all_small: (&[0, 2, 3, 1], 1000);
                 mixed: (&[0, 14, 3, 1027], 1000);
             }
+
+            shrink_to(len: u16, initial_cap: usize, new_cap: usize) {
+                small_to_small: (2, 2, 2);
+                small_to_large_noop: (2, 2, 8);
+                large_to_small: (2, 8, 2);
+                large_to_large: (2, 8, 6);
+                large_to_large_noop: (8, 8, 2);
+            }
+
+            shrink_to_fit(len: u16, initial_cap: usize) {
+                small: (2, 2);
+                large_to_small: (2, 8);
+                large_to_large: (4, 8);
+                large_to_large_noop: (8, 8);
+            }
         }
     };
 }

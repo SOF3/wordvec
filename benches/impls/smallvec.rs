@@ -84,4 +84,19 @@ impl<B: BlackBox> super::Benches<B> for Benches {
             }
         }
     }
+
+    fn has_shrink_to() -> bool { false }
+    fn shrink_to(self, _len: u16, _initial_cap: usize, _new_cap: usize) -> impl FnOnce() {
+        move || unimplemented!()
+    }
+
+    fn shrink_to_fit(self, len: u16, initial_cap: usize) -> impl FnOnce() {
+        let mut v: Shorts = Shorts::with_capacity(initial_cap);
+        v.extend(0..len);
+
+        move || {
+            v.shrink_to_fit();
+            B::black_box(&mut v);
+        }
+    }
 }

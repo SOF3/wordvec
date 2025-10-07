@@ -242,3 +242,36 @@ fn test_clear() {
     assert::<4>(&["a", "b", "c"], 4);
     assert::<2>(&["a", "b", "c"], 4);
 }
+
+#[test]
+fn test_shrink() {
+    fn assert<const N: usize>(
+        input: &[&str],
+        initial_cap: usize,
+        shrink_to: usize,
+        expected_cap: usize,
+    ) {
+        let counter = Cell::new(0);
+        let mut wv = WordVec::<AssertDrop, N>::with_capacity(initial_cap);
+        wv.extend(input.iter().map(|&s| AssertDrop { _string: s.into(), counter: &counter }));
+
+        assert_eq!(wv.len(), input.len());
+        assert_eq!(wv.capacity(), initial_cap);
+        assert_eq!(counter.get(), 0);
+
+        wv.shrink_to(shrink_to);
+
+        assert_eq!(wv.len(), input.len());
+        assert!(wv.capacity() == expected_cap);
+        assert_eq!(counter.get(), 0);
+
+        drop(wv);
+
+        assert_eq!(counter.get(), input.len());
+    }
+
+    assert::<2>(&["a", "b", "c"], 8, 4, 4);
+    assert::<2>(&["a", "b", "c"], 8, 2, 3);
+    assert::<4>(&["a", "b", "c"], 8, 2, 4);
+    assert::<4>(&["a", "b", "c"], 8, 5, 5);
+}
