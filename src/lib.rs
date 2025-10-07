@@ -45,7 +45,10 @@ use core::{array, cmp, fmt, iter, slice};
 mod tests;
 
 mod polyfill;
-#[allow(clippy::wildcard_imports)]
+#[allow(
+    clippy::wildcard_imports,
+    reason = "polyfill only contains a small number of unambiguous functions"
+)]
 use polyfill::*;
 
 /// A thin and small vector that can fit data into a single `usize`.
@@ -251,6 +254,10 @@ impl<T> Allocated<T> {
     unsafe fn data_start(this: NonNull<Self>) -> *mut T {
         unsafe { (&raw mut (*this.as_ptr()).data_start).cast() }
     }
+}
+
+struct ShrinkToArgs {
+    len: usize,
 }
 
 impl<T, const N: usize> WordVec<T, N> {
@@ -532,6 +539,88 @@ impl<T, const N: usize> WordVec<T, N> {
         let large = unsafe { Large::new(new_cap, data_slice) };
 
         self.0.large = ManuallyDrop::new(large);
+    }
+
+    /// Shrinks the capacity of the vector as much as possible.
+    ///
+    /// If the new capacity fits into the inlined layout,
+    /// the data is moved to the inlined layout.
+    /// Otherwise, the allocation is reallocated to the smaller size.
+    pub fn shrink_to_fit(&mut self) { self.shrink_to_with(|args| args.len.max(N)); }
+
+    /// Shrinks the capacity of the vector with a lower bound.
+    ///
+    /// The capacity will remain at least as large as both the length
+    /// and the supplied value.
+    ///
+    /// If the current capacity is less than the lower limit, this is a no-op.
+    ///
+    /// If the new capacity fits into the inlined layout,
+    /// the data is moved to the inlined layout.
+    /// Otherwise, the allocation is reallocated to the smaller size.
+    pub fn shrink_to(&mut self, min_cap: usize) {
+        // new capacity must be:
+        // - at least self.len(), so that data do not get truncated
+        // - at least min_cap, as requested
+        // - at least N, because capacity can never be less than N
+        self.shrink_to_with(|args| args.len.max(min_cap).max(N))
+    }
+
+    fn shrink_to_with(&mut self, get_new_cap: impl FnOnce(ShrinkToArgs) -> usize) {
+        if let ParsedMarker::Small(_) = self.0.parse_marker() {
+            return; // small cannot be further shrunk
+        }
+
+        // SAFETY: marker is Large
+        let large = unsafe { &mut *self.0.large };
+        let alloc_ptr = large.0;
+        // SAFETY: alloc_ptr is still valid.
+        let &Allocated { len, .. } = unsafe { alloc_ptr.as_ref() };
+        let large_layout = large.current_layout();
+
+        let new_cap = get_new_cap(ShrinkToArgs { len });
+        if new_cap == N {
+            // SAFETY: alloc_ptr is still valid.
+            let data_start = unsafe { Allocated::data_start(alloc_ptr) };
+
+            self.0.small = ManuallyDrop::new(Small {
+                marker: u8::try_from(len << 1)
+                    .expect("len <= new_cap == N <= 127, so len * 2 <= 254")
+                    | 1,
+                data:   [const { MaybeUninit::<T>::uninit() }; N],
+            });
+            // SAFETY:
+            // - data_start is derived from alloc_ptr, which must not point back to itself
+            // - self.0 is now initialized as Small.
+            // - data_start is still valid until alloc_ptr is deallocated below.
+            unsafe {
+                ptr::copy_nonoverlapping(data_start, (*self.0.small).data.as_mut_ptr().cast(), len);
+            }
+
+            // This is the last statement of this branch,
+            // and alloc_ptr is no longer referenced since
+            // its only reference was overwritten by writing to self.0.small above.
+            unsafe {
+                dealloc(alloc_ptr.as_ptr().cast(), large_layout);
+            }
+        } else {
+            // SAFETY: alloc_ptr is still valid at this point, and new_cap > N > 0.
+            let new_layout = Large::<T>::new_layout(new_cap);
+            let new_alloc_ptr =
+                unsafe { realloc(alloc_ptr.as_ptr().cast(), large_layout, new_layout.size()) };
+            match NonNull::new(new_alloc_ptr) {
+                None => {
+                    handle_alloc_error(new_layout);
+                }
+                Some(new_alloc_ptr) => {
+                    large.0 = new_alloc_ptr.cast();
+                    // SAFETY: large.0 has just been updated to a new valid allocation.
+                    unsafe {
+                        large.0.as_mut().cap = new_cap;
+                    }
+                }
+            }
+        }
     }
 
     /// Removes the item at index `index`,
