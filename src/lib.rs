@@ -547,7 +547,7 @@ impl<T, const N: usize> WordVec<T, N> {
     }
 
     /// Reserves capacity for at least `additional` more elements to be inserted
-    /// in the given `Vec<T>`. The collection may reserve more space to
+    /// in the given `WordVec<T, N>`. The collection may reserve more space to
     /// speculatively avoid frequent reallocations. After calling `reserve`,
     /// capacity will be greater than or equal to `self.len() + additional`.
     /// Does nothing if capacity is already sufficient.
