@@ -256,6 +256,11 @@ impl<T> Allocated<T> {
     }
 }
 
+struct ReserveArgs {
+    len: usize,
+    cap: usize,
+}
+
 struct ShrinkToArgs {
     len: usize,
 }
@@ -541,6 +546,74 @@ impl<T, const N: usize> WordVec<T, N> {
         self.0.large = ManuallyDrop::new(large);
     }
 
+    /// Reserves capacity for at least `additional` more elements to be inserted
+    /// in the given `WordVec<T, N>`. The collection may reserve more space to
+    /// speculatively avoid frequent reallocations. After calling `reserve`,
+    /// capacity will be greater than or equal to `self.len() + additional`.
+    /// Does nothing if capacity is already sufficient.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity results in integer overflow.
+    pub fn reserve(&mut self, additional: usize) {
+        self.reserve_with(|args| {
+            let req = args.len.checked_add(additional).expect("capacity overflow");
+            if req <= args.cap {
+                args.cap
+            } else if req <= args.cap * 2 {
+                args.cap * 2
+            } else {
+                req
+            }
+        });
+    }
+
+    /// Reserves the minimum capacity for at least `additional` more elements to
+    /// be inserted in the given `WordVec<T, N>`. Unlike [`reserve`], this will not
+    /// deliberately over-allocate to speculatively avoid frequent allocations.
+    /// After calling `reserve_exact`, capacity will be greater than or equal to
+    /// `self.len() + additional`. Does nothing if the capacity is already
+    /// sufficient.
+    ///
+    /// Note that the allocator may give the collection more space than it
+    /// requests. Therefore, capacity can not be relied upon to be precisely
+    /// minimal. Prefer [`reserve`] if future insertions are expected.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity results in integer overflow.
+    pub fn reserve_exact(&mut self, additional: usize) {
+        self.reserve_with(|args| {
+            let req = args.len.checked_add(additional).expect("capacity overflow");
+            req.max(args.cap)
+        });
+    }
+
+    fn reserve_with(&mut self, get_new_cap: impl FnOnce(ReserveArgs) -> usize) {
+        match self.0.parse_marker() {
+            ParsedMarker::Small(len) => {
+                let len = usize::from(len);
+                let new_cap = get_new_cap(ReserveArgs { len, cap: N });
+                if new_cap > N {
+                    // SAFETY: parsed marker as small,
+                    // and new_cap > N >= len
+                    unsafe {
+                        self.move_small_to_large(new_cap);
+                    }
+                }
+            }
+            ParsedMarker::Large => {
+                // SAFETY: parsed marker as large
+                let large = unsafe { &mut self.0.large };
+                let (&Allocated { len, cap, .. }, _) = large.as_allocated();
+                let new_cap = get_new_cap(ReserveArgs { len, cap });
+                if new_cap > cap {
+                    large.grow_exact(new_cap);
+                }
+            }
+        }
+    }
+
     /// Shrinks the capacity of the vector as much as possible.
     ///
     /// If the new capacity fits into the inlined layout,
@@ -563,7 +636,7 @@ impl<T, const N: usize> WordVec<T, N> {
         // - at least self.len(), so that data do not get truncated
         // - at least min_cap, as requested
         // - at least N, because capacity can never be less than N
-        self.shrink_to_with(|args| args.len.max(min_cap).max(N))
+        self.shrink_to_with(|args| args.len.max(min_cap).max(N));
     }
 
     fn shrink_to_with(&mut self, get_new_cap: impl FnOnce(ShrinkToArgs) -> usize) {
