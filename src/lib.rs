@@ -415,6 +415,30 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Inserts an item at the specified index.
+    ///
+    /// # Panics
+    /// Panics if `index > len`.
+    pub fn insert(&mut self, index: usize, value: T) {
+        self.reserve(1);
+        let (capacity_slice, len) = self.as_uninit_slice_with_length();
+        assert!(index <= len, "insertion index (is {index}) should be <= len (is {len})");
+
+        #[expect(clippy::range_plus_one, reason = "len+1 is more explicit")]
+        let mutated_slice = &mut capacity_slice[index..len + 1];
+        let mutated_len = mutated_slice.len();
+
+        // mutated_slice[..mutated_slice.len() - 1] is initialized and need to be right-rotated
+        mutated_slice[..mutated_len].rotate_right(1);
+
+        mutated_slice[0] = MaybeUninit::new(value);
+
+        // SAFETY: mutated_slice is now fully initialized.
+        unsafe {
+            self.set_len(len + 1);
+        }
+    }
+
     /// # Safety
     /// - The current marker must be `small`
     /// - `self.len() + values.len()` must be less than or equal to `N`
