@@ -426,10 +426,13 @@ impl<T, const N: usize> WordVec<T, N> {
 
         #[expect(clippy::range_plus_one, reason = "len+1 is more explicit")]
         let mutated_slice = &mut capacity_slice[index..len + 1];
-        let mutated_len = mutated_slice.len();
 
-        // mutated_slice[..mutated_slice.len() - 1] is initialized and need to be right-rotated
-        mutated_slice[..mutated_len].rotate_right(1);
+        // mutated_slice[..mutated_slice.len() - 1] is initialized and
+        // needs to be right-shifted to `mutated_slice[1..]`
+        let mutated_len = mutated_slice.len();
+        if !mutated_slice.is_empty() {
+            shift_right_once(&mut mutated_slice[..mutated_len]);
+        }
 
         mutated_slice[0] = MaybeUninit::new(value);
 
@@ -742,9 +745,10 @@ impl<T, const N: usize> WordVec<T, N> {
         let slice = self.remove_last_uninit(index)?;
 
         let mutated_slice = &mut slice[index..];
-        mutated_slice.rotate_left(1);
         // SAFETY: index < `old_len`, so `mutated_slice` must not be empty.
-        unsafe { Some(mutated_slice.last_mut().unwrap_unchecked().assume_init_read()) }
+        let removed = unsafe { mutated_slice.first_mut().unwrap_unchecked().assume_init_read() };
+        shift_left_once(mutated_slice);
+        Some(removed)
     }
 
     /// Removes the item at index `index`,
@@ -869,6 +873,30 @@ impl<T, const N: usize> WordVec<T, N> {
                 allocated.len = new_len;
             }
         }
+    }
+}
+
+/// Shifts `slice[1..]` to `slice[..slice.len()-1]`.
+///
+/// # Panics
+/// Panics if `slice` is empty.
+fn shift_left_once<T>(slice: &mut [MaybeUninit<T>]) {
+    let moved_items = slice.len().checked_sub(1).expect("cannot shift empty slice");
+    let ptr = slice.as_mut_ptr();
+    unsafe {
+        ptr::copy(ptr.add(1), ptr, moved_items);
+    }
+}
+
+/// Shifts `slice[..slice.len()-1]` to `slice[1..]`.
+///
+/// # Panics
+/// Panics if `slice` is empty.
+fn shift_right_once<T>(slice: &mut [MaybeUninit<T>]) {
+    let moved_items = slice.len().checked_sub(1).expect("cannot shift empty slice");
+    let ptr = slice.as_mut_ptr();
+    unsafe {
+        ptr::copy(ptr, ptr.add(1), moved_items);
     }
 }
 
