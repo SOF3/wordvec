@@ -13,7 +13,7 @@ fn assert_size() {
 }
 
 struct AssertDrop<'a> {
-    _string: String,
+    string:  String,
     counter: &'a Cell<usize>,
 }
 
@@ -157,7 +157,7 @@ fn test_into_iter_drop() {
         let mut wv = WordVec::<AssertDrop, N>::default();
 
         for &input in inputs {
-            wv.push(AssertDrop { _string: input.into(), counter: &counter });
+            wv.push(AssertDrop { string: input.into(), counter: &counter });
         }
 
         assert_eq!(counter.get(), 0);
@@ -226,7 +226,7 @@ fn test_clear() {
     fn assert<const N: usize>(input: &[&str], cap: usize) {
         let counter = Cell::new(0);
         let mut wv = WordVec::<AssertDrop, N>::with_capacity(cap);
-        wv.extend(input.iter().map(|&s| AssertDrop { _string: s.into(), counter: &counter }));
+        wv.extend(input.iter().map(|&s| AssertDrop { string: s.into(), counter: &counter }));
 
         assert_eq!(wv.len(), input.len());
         assert_eq!(wv.capacity(), cap);
@@ -253,7 +253,7 @@ fn test_shrink() {
     ) {
         let counter = Cell::new(0);
         let mut wv = WordVec::<AssertDrop, N>::with_capacity(initial_cap);
-        wv.extend(input.iter().map(|&s| AssertDrop { _string: s.into(), counter: &counter }));
+        wv.extend(input.iter().map(|&s| AssertDrop { string: s.into(), counter: &counter }));
 
         assert_eq!(wv.len(), input.len());
         assert_eq!(wv.capacity(), initial_cap);
@@ -286,7 +286,7 @@ fn test_reserve() {
     ) {
         let counter = Cell::new(0);
         let mut wv = WordVec::<AssertDrop, N>::with_capacity(initial_cap);
-        wv.extend(input.iter().map(|&s| AssertDrop { _string: s.into(), counter: &counter }));
+        wv.extend(input.iter().map(|&s| AssertDrop { string: s.into(), counter: &counter }));
 
         assert_eq!(wv.len(), input.len());
         assert_eq!(wv.capacity(), initial_cap);
@@ -319,7 +319,7 @@ fn test_reserve_exact() {
     ) {
         let counter = Cell::new(0);
         let mut wv = WordVec::<AssertDrop, N>::with_capacity(initial_cap);
-        wv.extend(input.iter().map(|&s| AssertDrop { _string: s.into(), counter: &counter }));
+        wv.extend(input.iter().map(|&s| AssertDrop { string: s.into(), counter: &counter }));
 
         assert_eq!(wv.len(), input.len());
         assert_eq!(wv.capacity(), initial_cap);
@@ -340,4 +340,37 @@ fn test_reserve_exact() {
     assert::<4>(&["a", "b"], 4, 3, 5);
     assert::<2>(&["a", "b", "c"], 4, 1, 4);
     assert::<2>(&["a", "b", "c"], 4, 3, 6);
+}
+
+#[test]
+fn test_insert() {
+    fn assert<const N: usize>(input: &[&str], index: usize, val: &str, expect: &[&str]) {
+        let counter = Cell::new(0);
+        let mut wv: WordVec<AssertDrop, N> =
+            input.iter().map(|&s| AssertDrop { string: s.into(), counter: &counter }).collect();
+        wv.insert(index, AssertDrop { string: val.into(), counter: &counter });
+        assert_eq!(wv.as_slice().iter().map(|s| s.string.as_str()).collect::<Vec<_>>(), expect);
+        assert_eq!(counter.get(), 0);
+
+        drop(wv);
+        assert_eq!(counter.get(), expect.len());
+    }
+
+    assert::<4>(&[], 0, "a", &["a"]);
+    assert::<0>(&[], 0, "a", &["a"]);
+
+    assert::<4>(&["a", "b"], 0, "c", &["c", "a", "b"]);
+    assert::<3>(&["a", "b"], 0, "c", &["c", "a", "b"]);
+    assert::<2>(&["a", "b"], 0, "c", &["c", "a", "b"]);
+    assert::<1>(&["a", "b"], 0, "c", &["c", "a", "b"]);
+
+    assert::<4>(&["a", "b"], 1, "c", &["a", "c", "b"]);
+    assert::<3>(&["a", "b"], 1, "c", &["a", "c", "b"]);
+    assert::<2>(&["a", "b"], 1, "c", &["a", "c", "b"]);
+    assert::<1>(&["a", "b"], 1, "c", &["a", "c", "b"]);
+
+    assert::<4>(&["a", "b"], 2, "c", &["a", "b", "c"]);
+    assert::<3>(&["a", "b"], 2, "c", &["a", "b", "c"]);
+    assert::<2>(&["a", "b"], 2, "c", &["a", "b", "c"]);
+    assert::<1>(&["a", "b"], 2, "c", &["a", "b", "c"]);
 }
