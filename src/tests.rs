@@ -222,6 +222,40 @@ fn test_swap_remove_large() {
 }
 
 #[test]
+fn test_pop_empty() {
+    let mut wv = WordVec::<i32, 4>::new();
+    assert!(wv.pop().is_none());
+    assert_eq!(wv.as_slice(), &[]);
+}
+
+#[test]
+fn test_pop_small() {
+    let mut wv = WordVec::<i32, 4>::from([1, 2]);
+    assert_eq!(wv.pop(), Some(2));
+    assert_eq!(wv.as_slice(), &[1]);
+}
+
+#[test]
+fn test_pop_large() {
+    let mut wv = WordVec::<i32, 2>::from([1, 2, 3, 4]);
+
+    assert_eq!(wv.pop(), Some(4));
+    assert_eq!(wv.as_slice(), &[1, 2, 3]);
+
+    assert_eq!(wv.pop(), Some(3));
+    assert_eq!(wv.as_slice(), &[1, 2]);
+
+    assert_eq!(wv.pop(), Some(2));
+    assert_eq!(wv.as_slice(), &[1]);
+
+    assert_eq!(wv.pop(), Some(1));
+    assert_eq!(wv.as_slice(), &[]);
+
+    assert!(wv.pop().is_none());
+    assert_eq!(wv.as_slice(), &[]);
+}
+
+#[test]
 fn test_clear() {
     fn assert<const N: usize>(input: &[&str], cap: usize) {
         let counter = Cell::new(0);

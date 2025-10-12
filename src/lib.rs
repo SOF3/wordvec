@@ -778,6 +778,15 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Removes the last item.
+    /// Returns `None` if the vector is empty.
+    ///
+    /// The vector capacity is unchanged.
+    pub fn pop(&mut self) -> Option<T> {
+        let last_index = self.len().checked_sub(1)?;
+        self.try_swap_remove(last_index)
+    }
+
     /// Reduces the length by one.
     /// Returns `None` if the vector length is less than or equal to `len_gt`.
     ///
