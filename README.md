@@ -50,21 +50,29 @@ which distinguishes it from the inlined layout.
 
 ## When to use
 
+WordVec is a niche data structure that works best when all of the following conditions are met:
+
+### Less than 24 bytes
 Although the technical limit is `N <= 127`,
 it is not meaningful to set `N` such that `align_of::<T>() + N * size_of::<T>()` exceeds 24;
 WordVec has no advantage over [SmallVec][smallvec] if it cannot pack into a smaller struct.
 
+### Inlined layout is hot path
 Thin vectors are significantly (several times) slower than conventional vectors
 since reading the length and capacity usually involves accessing memory out of active cache.
 Thus, heap layout is supposed to be the cold path.
 In other words, WordVec is basically
 "length should never exceed `N`, but behavior is still correct when it exceeds".
 
+### Many colocated vectors
 Since the length encoding in the inlined layout is indirect (involves a bitshift),
 raw inlined access also tends to be slower in WordVec compared to SmallVec,
 as a tradeoff of reduced memory footprint of each vector alone.
-This may get handy in scenarios with a large array of small vectors,
-e.g. as an ECS component.
+However, it reduces the number of L1 cache misses due to tighter packing between inlined data,
+which leads to better overall performance when many vectors are colocated.
+
+This may get handy in scenarios with a large array of small vectors, e.g. [ECS][ecs],
+where WordVec as a component would be packed in an archetype component storage contiguously.
 
 ## Platform requirements
 
@@ -82,12 +90,13 @@ and may not be very reliable.
 You may reproduce the benchmarks yourself by running `cargo bench --bench criterion`,
 or check the [valgrind-based analysis][bench-iai] instead.
 
-The benchmarks compare `std::vec`, 
-
-The general observation is that WordVec performance is comparable to SmallVec, but:
-- is slower with operations on a *single* small vector (presumably due to bitshifting the length byte)
+The benchmarks compare `std::vec`, [`thinvec`][thinvec], [`smallvec`][smallvec] and `wordvec`.
+The general observation is that WordVec performance is mostly comparable to SmallVec, but:
+- is consistently slower with operations on a *single* small vector (presumably due to bitshifting the length byte),
+  particularly resizing operations such as `push`.
 - is sometimes slower with operations on large vectors due to thinness (reading/writing length/capacity from heap)
-- is sometimes faster with operations on *many* small vectors due to more efficient memory (fewer RAM accesses)
+- is consistently faster with operations on *many* small vectors due to more efficient memory (fewer RAM accesses),
+  particularly with operations updating the inner values of a `Vec<WordVec<T, N>>`.
 
 ## Vec feature parity
 
@@ -102,3 +111,4 @@ I do not have bandwidth to implement all those functions but I am happy to revie
 [std-vec]: https://doc.rust-lang.org/std/vec/struct.Vec.html
 [bench-criterion]: https://sof3.github.io/wordvec/report/index.html
 [bench-iai]: https://sof3.github.io/wordvec/iai/summary.txt
+[ecs]: https://en.wikipedia.org/wiki/Entity_component_system
