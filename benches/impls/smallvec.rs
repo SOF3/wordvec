@@ -2,9 +2,13 @@ use smallvec::SmallVec;
 
 use super::BlackBox;
 
+#[allow(unused)]
 pub struct Benches;
 
+#[allow(unused)]
 type Shorts = SmallVec<[u16; 3]>;
+#[allow(unused)]
+type Words = SmallVec<[usize; 1]>;
 
 impl<B: BlackBox> super::Benches<B> for Benches {
     fn from_exact_array_and_drop(self, input: [u16; 3]) -> impl FnOnce() {
@@ -82,6 +86,25 @@ impl<B: BlackBox> super::Benches<B> for Benches {
             for shorts in &mut vecs {
                 shorts.iter_mut().for_each(|s| *s += 1);
             }
+        }
+    }
+
+    fn index_many(
+        self,
+        buf_size: usize,
+        indices: impl Iterator<Item = Vec<usize>>,
+    ) -> impl FnOnce() {
+        let mut buf = vec![0u64; buf_size];
+        let mut vecs: Vec<Words> = indices.map(|v| v.into_iter().collect()).collect();
+        B::black_box(&mut vecs);
+
+        move || {
+            for words in vecs {
+                for index in words {
+                    buf[index] = buf[index].wrapping_add(1);
+                }
+            }
+            B::black_box(&mut buf);
         }
     }
 
