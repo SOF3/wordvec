@@ -34,7 +34,7 @@ macro_rules! run_bench {
 macro_rules! run_benches {
     (
         $(
-            $bench_name:ident
+            $bench_name:ident $bench_name_strlit:literal
             $([$($generics:tt)*])?
             (
                 $(
@@ -53,28 +53,33 @@ macro_rules! run_benches {
     ) => {
         paste::paste! {
             $(
+                #[cfg(any(not(wordvec_bench_bench_partial), wordvec_bench_bench = $bench_name_strlit))]
                 fn [<bench_ $bench_name>](c: &mut Criterion) {
-                    let mut group = c.benchmark_group(stringify!($bench_name));
+                    let mut group = c.benchmark_group($bench_name_strlit);
 
                     $(
+                        #[cfg(any(not(wordvec_bench_module_partial), wordvec_bench_module = "std_vec"))]
                         run_bench! {
                             "std::vec", std_vec, group;
                             $bench_name, $variant_name, ::std::vec::Vec<u16>;
                             $($arg,)*;
                         }
 
+                        #[cfg(any(not(wordvec_bench_module_partial), wordvec_bench_module = "smallvec"))]
                         run_bench! {
                             "smallvec", smallvec, group;
                             $bench_name, $variant_name, ::smallvec::SmallVec<u16>;
                             $($arg,)*;
                         }
 
+                        #[cfg(any(not(wordvec_bench_module_partial), wordvec_bench_module = "wordvec"))]
                         run_bench! {
                             "wordvec", wordvec, group;
                             $bench_name, $variant_name, ::wordvec::WordVec<u16>;
                             $($arg,)*;
                         }
 
+                        #[cfg(any(not(wordvec_bench_module_partial), wordvec_bench_module = "thinvec"))]
                         run_bench! {
                             "thinvec", thinvec, group;
                             $bench_name, $variant_name, ::thin_vec::ThinVec<u16>;
@@ -82,12 +87,17 @@ macro_rules! run_benches {
                         }
                     )*
                 }
+
+                #[cfg(not(any(not(wordvec_bench_bench_partial), wordvec_bench_bench = $bench_name_strlit)))]
+                fn [<bench_ $bench_name>](_: &mut Criterion) {}
             )*
 
             criterion_group! {
                 name = criterion_benches;
                 config = Criterion::default();
-                targets = $([<bench_ $bench_name>],)*
+                targets = $(
+                    [<bench_ $bench_name>],
+                )*
             }
         }
     }

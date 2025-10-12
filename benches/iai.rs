@@ -8,16 +8,26 @@ impl impls::BlackBox for IaiBlackBox {
 
 macro_rules! run_bench {
     (
-        $module:ident;
-        $bench_name:ident, $variant_name:ident;
+        $module:ident $module_strlit:literal;
+        $bench_name:ident $bench_name_strlit:literal, $variant_name:ident;
         $($arg:expr,)*;
     ) => {
         paste::paste! {
+            #[cfg(all(
+                any(not(wordvec_bench_bench_partial), wordvec_bench_bench = $bench_name_strlit),
+                any(not(wordvec_bench_module_partial), wordvec_bench_module = $module_strlit),
+            ))]
             fn [<bench_ $module _ $bench_name _ $variant_name>]() {
                 if <impls::$module::Benches as impls::Benches<IaiBlackBox>>::[<has_ $bench_name>]() {
                     impls::Benches::<IaiBlackBox>::$bench_name(impls::$module::Benches, $($arg),*)();
                 }
             }
+
+            #[cfg(not(all(
+                any(not(wordvec_bench_bench_partial), wordvec_bench_bench = $bench_name_strlit),
+                any(not(wordvec_bench_module_partial), wordvec_bench_module = $module_strlit),
+            )))]
+            fn [<bench_ $module _ $bench_name _ $variant_name>]() {}
         }
     }
 }
@@ -25,7 +35,7 @@ macro_rules! run_bench {
 macro_rules! run_benches {
     (
         $(
-            $bench_name:ident
+            $bench_name:ident $bench_name_strlit:literal
             $([$($generics:tt)*])?
             (
                 $(
@@ -46,26 +56,26 @@ macro_rules! run_benches {
             $(
                 $(
                     run_bench! {
-                        std_vec;
-                        $bench_name, $variant_name;
+                        std_vec "std_vec";
+                        $bench_name $bench_name_strlit, $variant_name;
                         $($arg,)*;
                     }
 
                     run_bench! {
-                        smallvec;
-                        $bench_name, $variant_name;
+                        smallvec "smallvec";
+                        $bench_name $bench_name_strlit, $variant_name;
                         $($arg,)*;
                     }
 
                     run_bench! {
-                        wordvec;
-                        $bench_name, $variant_name;
+                        wordvec "wordvec";
+                        $bench_name $bench_name_strlit, $variant_name;
                         $($arg,)*;
                     }
 
                     run_bench! {
-                        thinvec;
-                        $bench_name, $variant_name;
+                        thinvec "thinvec";
+                        $bench_name $bench_name_strlit, $variant_name;
                         $($arg,)*;
                     }
                 )*
