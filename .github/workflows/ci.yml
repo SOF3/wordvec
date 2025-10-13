@@ -45,9 +45,9 @@ jobs:
             **/target
           key: ${{matrix.toolchain}}${{matrix.profile}}-${{hashFiles('**/Cargo.lock')}}
       - name: cargo clippy
-        run: cargo +${{matrix.toolchain}} clippy --all --tests ${{matrix.profile}}
+        run: cargo +${{matrix.toolchain}} clippy --all --tests --features serde ${{matrix.profile}}
       - name: cargo test
-        run: "cargo +${{matrix.toolchain}} test --all ${{matrix.profile}}"
+        run: "cargo +${{matrix.toolchain}} test --all --features serde ${{matrix.profile}}"
   miri:
     name: miri tests
     runs-on: ubuntu-latest
@@ -73,5 +73,4 @@ jobs:
             **/target
           key: ${{matrix.toolchain}}${{matrix.profile}}-${{hashFiles('**/Cargo.lock')}}-miri
       - name: cargo miri test
-        run: cargo +${{matrix.toolchain}} miri test ${{ matrix.profile }}
-
+        run: cargo +${{matrix.toolchain}} miri test --features serde ${{ matrix.profile }}
