@@ -36,7 +36,7 @@ use core::alloc::Layout;
 use core::hash::{self, Hash};
 use core::hint::assert_unchecked;
 use core::iter::FusedIterator;
-use core::mem::{ManuallyDrop, MaybeUninit, needs_drop};
+use core::mem::{self, ManuallyDrop, MaybeUninit, needs_drop};
 use core::ops::{self, Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::{array, cmp, fmt, iter, slice};
@@ -268,7 +268,45 @@ struct ShrinkToArgs {
 impl<T, const N: usize> WordVec<T, N> {
     /// Creates an empty vector.
     #[must_use]
-    pub fn new() -> Self { Self::default() }
+    pub const fn new() -> Self {
+        Inner::<T, N>::assert_generics();
+
+        Self(Inner {
+            small: ManuallyDrop::new(Small {
+                marker: 1,
+                data:   [const { MaybeUninit::uninit() }; N],
+            }),
+        })
+    }
+
+    /// Creates a new **inlined** vector with specified data.
+    ///
+    /// This function is semantically equivalent to `WordVec::from(array)`,
+    /// but allows constness due to array.
+    ///
+    /// # Errors
+    /// A *compile* error occurs if `LENGTH > N`.
+    #[must_use]
+    pub const fn new_inlined<const LENGTH: usize>(values: [T; LENGTH]) -> Self {
+        const {
+            Inner::<T, N>::assert_generics();
+            assert!(LENGTH <= N, "new_inlined can only be used to create an inlined vector");
+        }
+
+        let mut data = [const { MaybeUninit::uninit() }; N];
+        let mut index = 0;
+        while index < LENGTH {
+            // SAFETY: each index is only copied once, and `value` will no longer be used.
+            let value = &values[index];
+            unsafe { data[index].write(ptr::read(value)) };
+            index += 1;
+        }
+        mem::forget(values); // do not drop values; they have already been moved
+
+        Self(Inner {
+            small: ManuallyDrop::new(Small { marker: const { (LENGTH << 1) as u8 } | 1, data }),
+        })
+    }
 
     /// Creates an empty vector with the specified capacity.
     ///
@@ -910,14 +948,7 @@ fn shift_right_once<T>(slice: &mut [MaybeUninit<T>]) {
 }
 
 impl<T, const N: usize> Default for WordVec<T, N> {
-    fn default() -> Self {
-        Self(Inner {
-            small: ManuallyDrop::new(Small {
-                marker: 1,
-                data:   [const { MaybeUninit::uninit() }; N],
-            }),
-        })
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl<T, const LENGTH: usize, const N: usize> From<[T; LENGTH]> for WordVec<T, N> {
