@@ -33,6 +33,7 @@ extern crate alloc;
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
 use core::alloc::Layout;
+use core::borrow::{Borrow, BorrowMut};
 use core::hash::{self, Hash};
 use core::hint::assert_unchecked;
 use core::iter::FusedIterator;
@@ -329,17 +330,39 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
-    /// Returns the full capacity of the allocated buffer, which may be partly uninitialized,
-    /// along with the length of the initialized portion.
+    /// Returns the full partially-initialized buffer with the length of the initialized portion,
+    /// and a raw setter for the length.
     ///
-    /// This is equivalent to `(slice_from_raw_parts(as_mut_ptr(), cap), len)`,
+    /// This is equivalent to `(slice_from_raw_parts(as_mut_ptr(), capacity), length, set_length)`,
     /// but with the correct provenance since `as_mut_ptr` only returns provenance up to `len`.
-    pub fn as_uninit_slice_with_length(&mut self) -> (&mut [MaybeUninit<T>], usize) {
+    ///
+    /// # Safety
+    /// Although it is safe to call this function,
+    /// the returned types are only useful through unsafe APIs.
+    ///
+    /// For `let (slice, len, set_len) = v.as_uninit_slice_with_length_setter()`,
+    /// - Initially, only `slice[..len]` are initialized.
+    /// - `set_len.set_len(n)` must only be called when `slice[..n]` are *already* initialized.
+    /// - `slice[k..n]` must not be deinitialized (e.g. `assume_init_drop`ped)
+    ///   before calling `set_len.set_len(k)` if the current length is `n`.
+    pub fn as_uninit_slice_with_length_setter(
+        &mut self,
+    ) -> (&mut [MaybeUninit<T>], usize, LengthSetter<'_>) {
         match self.0.parse_marker() {
             ParsedMarker::Small(len) => {
                 // SAFETY: variant indicated by marker
-                let small = unsafe { &mut self.0.small };
-                (&mut small.data[..], usize::from(len))
+                let small = unsafe { &mut *self.0.small };
+                (
+                    &mut small.data[..],
+                    usize::from(len),
+                    LengthSetter {
+                        inner:                             LengthSetterInner::Small(
+                            &mut small.marker,
+                        ),
+                        #[cfg(debug_assertions)]
+                        capacity:                          N,
+                    },
+                )
             }
             ParsedMarker::Large => {
                 // SAFETY: variant indicated by marker
@@ -350,7 +373,17 @@ impl<T, const N: usize> WordVec<T, N> {
                 let slice = unsafe {
                     slice::from_raw_parts_mut(data_start.cast::<MaybeUninit<T>>(), allocated.cap)
                 };
-                (slice, allocated.len)
+                (
+                    slice,
+                    allocated.len,
+                    LengthSetter {
+                        inner:                             LengthSetterInner::Large(
+                            &mut allocated.len,
+                        ),
+                        #[cfg(debug_assertions)]
+                        capacity:                          allocated.cap,
+                    },
+                )
             }
         }
     }
@@ -421,7 +454,7 @@ impl<T, const N: usize> WordVec<T, N> {
     /// Panics if `index > len`.
     pub fn insert(&mut self, index: usize, value: T) {
         self.reserve(1);
-        let (capacity_slice, len) = self.as_uninit_slice_with_length();
+        let (capacity_slice, len, mut set_len) = self.as_uninit_slice_with_length_setter();
         assert!(index <= len, "insertion index (is {index}) should be <= len (is {len})");
 
         #[expect(clippy::range_plus_one, reason = "len+1 is more explicit")]
@@ -438,7 +471,7 @@ impl<T, const N: usize> WordVec<T, N> {
 
         // SAFETY: mutated_slice is now fully initialized.
         unsafe {
-            self.set_len(len + 1);
+            set_len.set_len(len + 1);
         }
     }
 
@@ -853,34 +886,45 @@ impl<T, const N: usize> WordVec<T, N> {
         let old_len = self.len();
         debug_assert!(new_len <= old_len);
 
+        let (capacity_slice, _, mut set_len) = self.as_uninit_slice_with_length_setter();
+
         // SAFETY: new_len <= old_len <= self.cap().
         unsafe {
-            self.set_len(new_len);
+            set_len.set_len(new_len);
         }
 
-        let (capacity_slice, _) = self.as_uninit_slice_with_length();
         &mut capacity_slice[new_len..old_len]
     }
+}
 
-    /// Sets the length to `new_len`.
+pub struct LengthSetter<'a> {
+    inner:    LengthSetterInner<'a>,
+    #[cfg(debug_assertions)]
+    capacity: usize,
+}
+
+enum LengthSetterInner<'a> {
+    Small(&'a mut u8),
+    Large(&'a mut usize),
+}
+
+impl LengthSetter<'_> {
+    /// Sets the raw length of this vector.
     ///
     /// # Safety
-    /// - `new_len` must be less than or equal to `self.cap()`.
-    /// - If `new_len >= self.len()`,
-    ///   the new items must be initialized before calling this function.
-    unsafe fn set_len(&mut self, new_len: usize) {
-        match self.0.parse_marker() {
-            ParsedMarker::Small(_) => {
-                // SAFETY: marker is Small
-                let small = unsafe { &mut self.0.small };
-                small.marker = (u8::try_from(new_len).expect("new_len <= N <= 127") << 1) | 1;
+    /// - `new_len` must be less than or equal to the current capacity.
+    /// - The first `new_len` items of the vector must be initialized.
+    pub unsafe fn set_len(&mut self, new_len: usize) {
+        // The cfg check is required because self.capacity does not exist in release mode.
+        #[cfg(debug_assertions)]
+        debug_assert!(new_len <= self.capacity, "guaranteed by the caller of the writer function.");
+
+        match self.inner {
+            LengthSetterInner::Small(ref mut marker) => {
+                // SAFETY: new_len <= N <= 127
+                **marker = (unsafe { u8::try_from(new_len).unwrap_unchecked() } << 1) | 1;
             }
-            ParsedMarker::Large => {
-                // SAFETY: marker is Large
-                let large = unsafe { &mut self.0.large };
-                let (allocated, _) = large.as_allocated_mut();
-                allocated.len = new_len;
-            }
+            LengthSetterInner::Large(ref mut len) => **len = new_len,
         }
     }
 }
@@ -1036,6 +1080,22 @@ impl<T, const N: usize> DerefMut for WordVec<T, N> {
     fn deref_mut(&mut self) -> &mut [T] { self.as_mut_slice() }
 }
 
+impl<T, const N: usize> AsRef<[T]> for WordVec<T, N> {
+    fn as_ref(&self) -> &[T] { self.as_slice() }
+}
+
+impl<T, const N: usize> AsMut<[T]> for WordVec<T, N> {
+    fn as_mut(&mut self) -> &mut [T] { self.as_mut_slice() }
+}
+
+impl<T, const N: usize> Borrow<[T]> for WordVec<T, N> {
+    fn borrow(&self) -> &[T] { self.as_slice() }
+}
+
+impl<T, const N: usize> BorrowMut<[T]> for WordVec<T, N> {
+    fn borrow_mut(&mut self) -> &mut [T] { self.as_mut_slice() }
+}
+
 impl<T, const N: usize, Idx> ops::Index<Idx> for WordVec<T, N>
 where
     [T]: ops::Index<Idx>,
@@ -1188,3 +1248,6 @@ impl<T, const N: usize> Drop for IntoIter<T, N> {
 // SAFETY: These are equivalent to the safety of `Vec<T>`.
 unsafe impl<T: Send, const N: usize> Send for WordVec<T, N> {}
 unsafe impl<T: Sync, const N: usize> Sync for WordVec<T, N> {}
+
+#[cfg(feature = "serde")]
+mod serde_impl;

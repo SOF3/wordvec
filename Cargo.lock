@@ -631,6 +631,8 @@ dependencies = [
  "criterion",
  "iai",
  "paste",
+ "serde",
+ "serde_json",
  "smallvec",
  "thin-vec",
 ]
