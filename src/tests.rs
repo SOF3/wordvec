@@ -37,6 +37,20 @@ fn test_from_and_as_slice() {
 }
 
 #[test]
+fn test_new_inlined() {
+    fn assert<const N: usize, const M: usize>(inputs: [i32; M]) {
+        let wv = WordVec::<i32, N>::new_inlined(inputs);
+        assert_eq!(wv.as_slice(), &inputs[..]);
+    }
+
+    assert::<1, 0>([]);
+    assert::<1, 1>([42]);
+    assert::<2, 0>([]);
+    assert::<2, 1>([42]);
+    assert::<2, 2>([42, 55]);
+}
+
+#[test]
 fn test_with_capacity() {
     assert_eq!(WordVec::<i32, 2>::with_capacity(0).capacity(), 2);
     assert_eq!(WordVec::<i32, 2>::with_capacity(1).capacity(), 2);
