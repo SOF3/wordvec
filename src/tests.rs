@@ -423,6 +423,38 @@ fn test_insert() {
     assert::<1>(&["a", "b"], 2, "c", &["a", "b", "c"]);
 }
 
+#[test]
+fn test_drain_long_short_long() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(3..5).collect();
+    assert_eq!(drained, [3, 4]);
+    assert_eq!(wv.as_slice(), &[0, 1, 2, 5, 6, 7]);
+}
+
+#[test]
+fn test_drain_long_short_long_early_drop() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(3..5).take(1).collect();
+    assert_eq!(drained, [3]);
+    assert_eq!(wv.as_slice(), &[0, 1, 2, 5, 6, 7]);
+}
+
+#[test]
+fn test_drain_long_long_short() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(3..6).collect();
+    assert_eq!(drained, [3, 4, 5]);
+    assert_eq!(wv.as_slice(), &[0, 1, 2, 6, 7]);
+}
+
+#[test]
+fn test_drain_long_long_short_early_drop() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(3..6).take(1).collect();
+    assert_eq!(drained, [3]);
+    assert_eq!(wv.as_slice(), &[0, 1, 2, 6, 7]);
+}
+
 #[cfg(feature = "serde")]
 mod test_serde {
     use alloc::string::String;

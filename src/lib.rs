@@ -38,7 +38,7 @@ use core::hash::{self, Hash};
 use core::hint::assert_unchecked;
 use core::iter::FusedIterator;
 use core::mem::{self, ManuallyDrop, MaybeUninit, needs_drop};
-use core::ops::{self, Deref, DerefMut};
+use core::ops::{self, Bound, Deref, DerefMut, RangeBounds};
 use core::ptr::{self, NonNull};
 use core::{array, cmp, fmt, iter, slice};
 
@@ -304,6 +304,10 @@ impl<T, const N: usize> WordVec<T, N> {
         }
         mem::forget(values); // do not drop values; they have already been moved
 
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "LENGTH <= N <= 127 must be within bounds of u7"
+        )]
         Self(Inner {
             small: ManuallyDrop::new(Small { marker: const { (LENGTH << 1) as u8 } | 1, data }),
         })
@@ -907,31 +911,77 @@ impl<T, const N: usize> WordVec<T, N> {
     /// Clears the vector, dropping all items.
     ///
     /// Does not change the capacity.
-    pub fn clear(&mut self) {
-        // SAFETY: 0 <= self.len() is always true.
-        let truncated = unsafe { self.decrease_len(0) };
-        // SAFETY: truncated is no longer used after decreasing length.
-        unsafe {
-            slice_assume_init_drop(truncated);
+    pub fn clear(&mut self) { self.truncate(0); }
+
+    /// Truncates the vector, dropping all items at and after index `len`.
+    ///
+    /// If `len` is greater or equal to the vector’s current length, this has no effect.
+    ///
+    /// Does not change the capacity.
+    pub fn truncate(&mut self, len: usize) {
+        let (capacity_slice, current_len, mut set_len) = self.as_uninit_slice_with_length_setter();
+        if current_len <= len {
+            return;
         }
+
+        // SAFETY: len < current_len <= capacity
+        unsafe { set_len.set_len(len) };
+
+        // SAFETY: the truncated portion was previously initialized and now no longer reachable due
+        // to setting the length to a smaller value.
+        unsafe { slice_assume_init_drop(&mut capacity_slice[len..current_len]) };
     }
 
-    /// Decreases the length to `new_len` and returns the slice of truncated data.
+    /// Removes the subslice indicated by the given range from the vector,
+    /// returning a double-ended iterator over the removed subslice.
     ///
-    /// # Safety
-    /// `new_len` must be less than or equal to `self.len()`.
-    unsafe fn decrease_len(&mut self, new_len: usize) -> &mut [MaybeUninit<T>] {
-        let old_len = self.len();
-        debug_assert!(new_len <= old_len);
+    /// If the iterator is dropped before being fully consumed,
+    /// it drops the remaining removed elements.
+    ///
+    /// # Panics
+    /// Panics if the starting point is greater than the end point or if
+    /// the end point is greater than the length of the vector.
+    ///
+    /// # Leaking
+    /// Unlike the std `Vec::drain`, wordvec is optimized for small vectors,
+    /// where copying drained data is assumed to be cheap.
+    /// Thus, the implementation of WordVec rotates the drained data behind the vector length,
+    /// so the WordVec is immediately drained when this function returns.
+    /// The result borrows the input only to provide read access to the drained buffer,
+    /// so leaking the result only leaks the items not yet drained
+    /// without affecting the integrity of the remaining vector.
+    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Drain<'_, T> {
+        let (capacity_slice, current_len, mut set_len) = self.as_uninit_slice_with_length_setter();
+        let initial_slice = &mut capacity_slice[..current_len];
 
-        let (capacity_slice, _, mut set_len) = self.as_uninit_slice_with_length_setter();
+        let start_drain = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n.checked_add(1).expect("start index overflow"),
+            Bound::Unbounded => 0,
+        };
+        let end_drain = match range.end_bound() {
+            Bound::Included(&n) => n.checked_add(1).expect("end index overflow"),
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => current_len,
+        };
 
-        // SAFETY: new_len <= old_len <= self.cap().
-        unsafe {
-            set_len.set_len(new_len);
-        }
+        assert!(start_drain <= end_drain, "start drain index must not exceed end drain index");
+        assert!(end_drain <= current_len, "end drain index must not exceed current vector length");
 
-        &mut capacity_slice[new_len..old_len]
+        let mutated_slice = &mut initial_slice[start_drain..];
+
+        let drained_len = end_drain - start_drain;
+        mutated_slice.rotate_left(drained_len);
+
+        let new_len = current_len - drained_len;
+        // SAFETY:
+        // - All data going to be deinitialized are now rotated to the last `drained_len` items.
+        // - new_len <= current_len <= capacity
+        unsafe { set_len.set_len(new_len) };
+
+        let skip_len = mutated_slice.len() - drained_len;
+        let drained = &mut mutated_slice[skip_len..];
+        Drain { drained: drained.iter_mut() }
     }
 }
 
@@ -963,6 +1013,25 @@ impl LengthSetter<'_> {
                 **marker = (unsafe { u8::try_from(new_len).unwrap_unchecked() } << 1) | 1;
             }
             LengthSetterInner::Large(ref mut len) => **len = new_len,
+        }
+    }
+
+    /// Increments the raw length of this vector by 1.
+    ///
+    /// # Safety
+    /// This has the same safety invariants as [`set_len`](Self::set_len),
+    /// with `new_len` being the current raw length plus one.
+    pub unsafe fn inc_len(&mut self) {
+        match self.inner {
+            LengthSetterInner::Small(ref mut marker) => {
+                // SAFETY: the caller is required to ensure that this never overflows,
+                // because current marker = length * 2 + 1 <= (N-1) * 2 + 1 = 2N - 1 <= 253.
+                **marker = unsafe { marker.unchecked_add(2) };
+            }
+            LengthSetterInner::Large(ref mut len) => {
+                // SAFETY: current length < capacity <= usize::MAX, so this will not overflow usize.
+                **len = unsafe { len.unchecked_add(1) };
+            }
         }
     }
 }
@@ -1279,6 +1348,9 @@ impl<T, const N: usize> Drop for IntoIter<T, N> {
 // SAFETY: These are equivalent to the safety of `Vec<T>`.
 unsafe impl<T: Send, const N: usize> Send for WordVec<T, N> {}
 unsafe impl<T: Sync, const N: usize> Sync for WordVec<T, N> {}
+
+mod drain;
+pub use drain::Drain;
 
 #[cfg(feature = "serde")]
 mod serde_impl;
