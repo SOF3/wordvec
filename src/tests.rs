@@ -424,6 +424,42 @@ fn test_insert() {
 }
 
 #[test]
+fn test_drain_nothing() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(3..3).collect();
+    assert!(drained.is_empty());
+    assert_eq!(wv.as_slice(), &[0, 1, 2, 3, 4, 5, 6, 7]);
+}
+
+#[test]
+fn test_drain_everything() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(0..8).collect();
+    assert_eq!(drained, [0, 1, 2, 3, 4, 5, 6, 7]);
+    assert!(wv.as_slice().is_empty());
+}
+
+#[test]
+fn test_drain_drop_calls_destructor() {
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..8).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 10>>();
+    drop(wv.drain(3..5));
+    assert_eq!(counter.get(), 2);
+    drop(wv); // ensure wv is dropped after counter check
+}
+
+#[test]
+fn test_drain_len_calls_destructor() {
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..8).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 10>>();
+    assert_eq!(wv.drain(3..5).len(), 2);
+    assert_eq!(counter.get(), 2);
+    drop(wv); // ensure wv is dropped after counter check
+}
+
+#[test]
 fn test_drain_long_short_long() {
     let mut wv = (0..8).collect::<WordVec<_, 10>>();
     let drained: Vec<_> = wv.drain(3..5).collect();

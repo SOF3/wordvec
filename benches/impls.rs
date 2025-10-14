@@ -94,6 +94,18 @@ macro_rules! list_benches {
                 large_to_large: (4, 8);
                 large_to_large_noop: (8, 8);
             }
+
+            drain "drain" (len: u16, start: usize, end: usize) {
+                small_nothing: (3, 1, 1);
+                small_full: (3, 0, 3);
+                small_long_short: (3, 0, 2);
+                small_short_long: (3, 0, 2);
+
+                large_nothing: (5, 1, 1);
+                large_full: (5, 0, 3);
+                large_long_short: (5, 0, 2);
+                large_short_long: (5, 0, 2);
+            }
         }
     };
 }
