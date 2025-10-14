@@ -943,13 +943,16 @@ impl<T, const N: usize> WordVec<T, N> {
     /// the end point is greater than the length of the vector.
     ///
     /// # Leaking
-    /// Unlike the std `Vec::drain`, wordvec is optimized for small vectors,
+    /// Unlike the std `Vec::drain`, leaking the returned iterator
+    /// only leaks the items not yet yielded from the iterator.
+    /// The vector is instantly in a sound state after this function returns
+    /// without waiting for the destructor of the returned iterator to run.
+    ///
+    /// # Performance
+    /// `WordVec` is optimized for small vectors,
     /// where copying drained data is assumed to be cheap.
     /// Thus, the implementation of WordVec rotates the drained data behind the vector length,
     /// so the WordVec is immediately drained when this function returns.
-    /// The result borrows the input only to provide read access to the drained buffer,
-    /// so leaking the result only leaks the items not yet drained
-    /// without affecting the integrity of the remaining vector.
     pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Drain<'_, T> {
         let (capacity_slice, current_len, mut set_len) = self.as_uninit_slice_with_length_setter();
         let initial_slice = &mut capacity_slice[..current_len];
