@@ -125,4 +125,16 @@ impl<B: BlackBox> super::Benches<B> for Benches {
             B::black_box(&mut v);
         }
     }
+
+    fn drain(self, len: u16, start: usize, end: usize) -> impl FnOnce() {
+        let mut v: Shorts = (0..len).collect();
+
+        move || {
+            let drained = v.drain(start..end);
+            for item in drained {
+                B::black_box(item);
+            }
+            B::black_box(&mut v);
+        }
+    }
 }
