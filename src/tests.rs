@@ -460,10 +460,34 @@ fn test_drain_len_calls_destructor() {
 }
 
 #[test]
+fn test_drain_len_trimmed_calls_destructor() {
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..8).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 10>>();
+    let mut drain = wv.drain(3..6);
+    assert_eq!(drain.next().map(|v| v.string.clone()), Some("3".into()));
+    assert_eq!(drain.next_back().map(|v| v.string.clone()), Some("5".into()));
+    assert_eq!(drain.len(), 1);
+    assert_eq!(counter.get(), 2);
+    assert_eq!(drain.count(), 1);
+    assert_eq!(counter.get(), 3);
+    drop(wv); // ensure wv is dropped after counter check
+    assert_eq!(counter.get(), 8);
+}
+
+#[test]
 fn test_drain_long_short_long() {
     let mut wv = (0..8).collect::<WordVec<_, 10>>();
     let drained: Vec<_> = wv.drain(3..5).collect();
     assert_eq!(drained, [3, 4]);
+    assert_eq!(wv.as_slice(), &[0, 1, 2, 5, 6, 7]);
+}
+
+#[test]
+fn test_drain_long_short_long_back() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(3..5).rev().collect();
+    assert_eq!(drained, [4, 3]);
     assert_eq!(wv.as_slice(), &[0, 1, 2, 5, 6, 7]);
 }
 
@@ -476,6 +500,14 @@ fn test_drain_long_short_long_early_drop() {
 }
 
 #[test]
+fn test_drain_long_short_long_early_drop_back() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(3..5).rev().take(1).collect();
+    assert_eq!(drained, [4]);
+    assert_eq!(wv.as_slice(), &[0, 1, 2, 5, 6, 7]);
+}
+
+#[test]
 fn test_drain_long_long_short() {
     let mut wv = (0..8).collect::<WordVec<_, 10>>();
     let drained: Vec<_> = wv.drain(3..6).collect();
@@ -484,10 +516,26 @@ fn test_drain_long_long_short() {
 }
 
 #[test]
+fn test_drain_long_long_short_back() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(3..6).rev().collect();
+    assert_eq!(drained, [5, 4, 3]);
+    assert_eq!(wv.as_slice(), &[0, 1, 2, 6, 7]);
+}
+
+#[test]
 fn test_drain_long_long_short_early_drop() {
     let mut wv = (0..8).collect::<WordVec<_, 10>>();
     let drained: Vec<_> = wv.drain(3..6).take(1).collect();
     assert_eq!(drained, [3]);
+    assert_eq!(wv.as_slice(), &[0, 1, 2, 6, 7]);
+}
+
+#[test]
+fn test_drain_long_long_short_early_drop_back() {
+    let mut wv = (0..8).collect::<WordVec<_, 10>>();
+    let drained: Vec<_> = wv.drain(3..6).rev().take(1).collect();
+    assert_eq!(drained, [5]);
     assert_eq!(wv.as_slice(), &[0, 1, 2, 6, 7]);
 }
 

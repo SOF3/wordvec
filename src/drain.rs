@@ -1,68 +1,97 @@
-use alloc::slice;
-use core::iter::{self, FusedIterator};
+use core::iter::FusedIterator;
 use core::mem::MaybeUninit;
+use core::ptr;
+
+use crate::LengthSetter;
+use crate::polyfill::slice_assume_init_drop;
 
 /// Return value of [`WordVec::drain`](super::WordVec::drain).
 pub struct Drain<'a, T> {
-    pub(super) drained: slice::IterMut<'a, MaybeUninit<T>>,
-}
+    // Immutable pointers.
+    pub(super) mutated_slice: &'a mut [MaybeUninit<T>],
+    pub(super) drain_width:   usize,
 
-impl<'a, T> Drain<'a, T> {
-    fn as_inited(
-        &mut self,
-    ) -> iter::Map<&mut slice::IterMut<'a, MaybeUninit<T>>, impl Fn(&mut MaybeUninit<T>) -> T> {
-        // HACK: this function is actually unsafe.
-        // But if we write this as a closure instead, RPIT would have type inference issues.
-        fn unsafe_assume_init_read<T>(item: &mut MaybeUninit<T>) -> T {
-            // SAFETY: each item is only `assume_init_read` once.
-            // Iterator does not know how to copy a `&mut`.
-            unsafe { item.assume_init_read() }
-        }
+    // Iteration state.
+    pub(super) remain_start: usize,
+    pub(super) remain_end:   usize,
 
-        self.drained.by_ref().map(unsafe_assume_init_read::<T>)
-    }
+    // Finalization utils.
+    pub(super) set_len:      LengthSetter<'a>,
+    pub(super) set_len_base: usize,
 }
 
 impl<T> Iterator for Drain<'_, T> {
     type Item = T;
 
-    fn next(&mut self) -> Option<T> { self.as_inited().next() }
+    fn next(&mut self) -> Option<T> {
+        if self.remain_start == self.remain_end {
+            return None;
+        }
 
-    fn size_hint(&self) -> (usize, Option<usize>) { self.drained.size_hint() }
+        // invariant ensured by Iterator methods
+        debug_assert!(self.remain_start < self.remain_end);
 
-    fn count(self) -> usize {
-        self.drained.len()
-        // self.drained will be dropped here
+        let data =
+            unsafe { self.mutated_slice.get_unchecked_mut(self.remain_start).assume_init_read() };
+        self.remain_start += 1;
+
+        Some(data)
     }
 
-    fn nth(&mut self, n: usize) -> Option<T> { self.as_inited().nth(n) }
-
-    // fn advance_by(&mut self, n: usize) -> Result<(), NonZero<usize>> {
-    //     self.as_inited().advance_by(n)
-    // }
-
-    fn last(mut self) -> Option<T> { self.as_inited().last() }
-
-    fn fold<B, F>(mut self, init: B, f: F) -> B
-    where
-        F: FnMut(B, T) -> B,
-    {
-        self.as_inited().fold(init, f)
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
     }
+
+    fn count(self) -> usize { self.len() }
 }
 
 impl<T> DoubleEndedIterator for Drain<'_, T> {
-    fn next_back(&mut self) -> Option<T> { self.as_inited().next_back() }
+    fn next_back(&mut self) -> Option<T> {
+        if self.remain_start == self.remain_end {
+            return None;
+        }
 
-    fn nth_back(&mut self, n: usize) -> Option<T> { self.as_inited().nth_back(n) }
+        // invariant ensured by Iterator methods
+        debug_assert!(self.remain_start < self.remain_end);
+
+        self.remain_end -= 1; // this never underflows since 0 <= remain_start < remain_end
+        let data =
+            unsafe { self.mutated_slice.get_unchecked_mut(self.remain_end).assume_init_read() };
+
+        Some(data)
+    }
 }
 
 impl<T> ExactSizeIterator for Drain<'_, T> {
-    fn len(&self) -> usize { self.drained.len() }
+    fn len(&self) -> usize { self.remain_end - self.remain_start }
 }
 
 impl<T> FusedIterator for Drain<'_, T> {}
 
-impl<T> Drop for Drain<'_, T> {
-    fn drop(&mut self) { self.as_inited().for_each(drop); }
+impl<'a, T> Drop for Drain<'a, T> {
+    fn drop(&mut self) {
+        // Drop the remaining elements in the drained slice,
+        // then replace the entire mutated_slice to the eventual value.
+        // Only increase length after all of the above are done,
+        // in case the destructor of `T` panics.
+
+        // SAFETY: the "remain" range is always initialized.
+        unsafe {
+            slice_assume_init_drop(&mut self.mutated_slice[self.remain_start..self.remain_end]);
+        }
+
+        let count = self.mutated_slice.len() - self.drain_width;
+        // SAFETY: drain_width <= mutated_slice.len() ensured during construction.
+        unsafe {
+            let mutated_ptr = self.mutated_slice.as_mut_ptr();
+            let src_ptr = mutated_ptr.add(self.drain_width);
+            let dest_ptr = mutated_ptr;
+            ptr::copy(src_ptr, dest_ptr, count);
+        }
+
+        unsafe {
+            self.set_len.set_len(self.set_len_base + self.mutated_slice.len() - self.drain_width);
+        }
+    }
 }

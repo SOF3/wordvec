@@ -943,16 +943,9 @@ impl<T, const N: usize> WordVec<T, N> {
     /// the end point is greater than the length of the vector.
     ///
     /// # Leaking
-    /// Unlike the std `Vec::drain`, leaking the returned iterator
-    /// only leaks the items not yet yielded from the iterator.
-    /// The vector is instantly in a sound state after this function returns
-    /// without waiting for the destructor of the returned iterator to run.
-    ///
-    /// # Performance
-    /// `WordVec` is optimized for small vectors,
-    /// where copying drained data is assumed to be cheap.
-    /// Thus, the implementation of WordVec rotates the drained data behind the vector length,
-    /// so the WordVec is immediately drained when this function returns.
+    /// The vector is initially truncated to `range.start_bound()`.
+    /// If the returned iterator is dropped before being fully consumed,
+    /// the unconsumed elements as well as the elements behind the drained range are leaked.
     pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Drain<'_, T> {
         let (capacity_slice, current_len, mut set_len) = self.as_uninit_slice_with_length_setter();
         let initial_slice = &mut capacity_slice[..current_len];
@@ -971,20 +964,23 @@ impl<T, const N: usize> WordVec<T, N> {
         assert!(start_drain <= end_drain, "start drain index must not exceed end drain index");
         assert!(end_drain <= current_len, "end drain index must not exceed current vector length");
 
+        // SAFETY: start_drain <= end_drain <= current_len <= capacity
+        // Reduces the length to the certainly initialized range.
+        // Only increase it upon Drain::drop to reduce number of set_len calls,
+        // which could be more expensive due to bitshift or heap access.
+        unsafe { set_len.set_len(start_drain) };
+
         let mutated_slice = &mut initial_slice[start_drain..];
+        let drained_offset = end_drain - start_drain;
 
-        let drained_len = end_drain - start_drain;
-        mutated_slice.rotate_left(drained_len);
-
-        let new_len = current_len - drained_len;
-        // SAFETY:
-        // - All data going to be deinitialized are now rotated to the last `drained_len` items.
-        // - new_len <= current_len <= capacity
-        unsafe { set_len.set_len(new_len) };
-
-        let skip_len = mutated_slice.len() - drained_len;
-        let drained = &mut mutated_slice[skip_len..];
-        Drain { drained: drained.iter_mut() }
+        Drain {
+            mutated_slice,
+            drain_width: drained_offset,
+            remain_start: 0,
+            remain_end: drained_offset,
+            set_len,
+            set_len_base: start_drain,
+        }
     }
 }
 
