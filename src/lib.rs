@@ -38,7 +38,7 @@ use core::hint::assert_unchecked;
 use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Bound, RangeBounds};
 use core::ptr::{self, NonNull};
-use core::{iter, slice};
+use core::{cmp, iter, slice};
 
 #[cfg(test)]
 mod tests;
@@ -98,6 +98,20 @@ impl<T, const N: usize> Inner<T, N> {
 struct Small<T, const N: usize> {
     marker: u8,
     data:   [MaybeUninit<T>; N],
+}
+
+impl<T, const N: usize> Small<T, N> {
+    const fn new_uninit(len: usize) -> Self { Self::new(len, [const { MaybeUninit::uninit() }; N]) }
+
+    const fn new(len: usize, data: [MaybeUninit<T>; N]) -> Self {
+        Inner::<T, N>::assert_generics();
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "LENGTH <= N <= 127 must be within bounds of u7"
+        )]
+        Self { marker: (len << 1) as u8 | 1, data }
+    }
 }
 
 #[cfg(target_endian = "big")]
@@ -167,6 +181,55 @@ impl<T> Large<T> {
         }
     }
 
+    fn extend_iter(&mut self, values: impl Iterator<Item = T>) {
+        let (&Allocated { len, mut cap, .. }, _) = self.as_allocated();
+
+        let (hint_min, _) = values.size_hint();
+        let hint_len = len.checked_add(hint_min).expect("new length out of bounds");
+
+        if hint_len > cap {
+            cap = self.grow(hint_len);
+        }
+
+        let mut new_len = len;
+        let mut values = values.fuse();
+
+        while new_len < cap {
+            // This simple loop allows better optimizations subject to the implementation of
+            // `values`.
+            if let Some(item) = values.next() {
+                new_len += 1; // new_len < cap <= usize::MAX, so this will not overflow
+                unsafe {
+                    let dest = Allocated::<T>::data_start(self.0).add(new_len - 1);
+                    dest.write(item);
+                }
+            } else {
+                // capacity is not full but input is exhausted
+                break;
+            }
+        }
+
+        for item in values {
+            new_len = new_len.checked_add(1).expect("new length is out of bounds");
+            if new_len > cap {
+                cap = self.grow(new_len);
+            }
+
+            unsafe {
+                let dest = Allocated::<T>::data_start(self.0).add(new_len - 1);
+                dest.write(item);
+            }
+        }
+
+        // SAFETY:
+        // - self.0 might have been reallocated, but accessing it through `self` is still correct.
+        // - only one item pushed at a time
+        unsafe {
+            let mut allocated_ptr = self.0;
+            allocated_ptr.as_mut().len = new_len;
+        }
+    }
+
     /// Create a new `Large` with a new allocation,
     /// and move the data from `src` to the new allocation.
     ///
@@ -203,7 +266,7 @@ impl<T> Large<T> {
 }
 
 /// This struct only contains the header (and padding) of the heap allocation.
-/// Due to provenance, `_data_start` cannot be directly converted to a slice reference;
+/// Due to provenance, `data_start` cannot be directly converted to a slice reference;
 /// the slice must always be derived from the allocation pointer (`NonNull<Allocated<T>>`)
 /// directly.
 #[repr(C)]
@@ -270,12 +333,7 @@ impl<T, const N: usize> WordVec<T, N> {
     pub const fn new() -> Self {
         Inner::<T, N>::assert_generics();
 
-        Self(Inner {
-            small: ManuallyDrop::new(Small {
-                marker: 1,
-                data:   [const { MaybeUninit::uninit() }; N],
-            }),
-        })
+        Self(Inner { small: ManuallyDrop::new(Small::new_uninit(0)) })
     }
 
     /// Creates a new **inlined** vector with specified data.
@@ -302,13 +360,7 @@ impl<T, const N: usize> WordVec<T, N> {
         }
         mem::forget(values); // do not drop values; they have already been moved
 
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "LENGTH <= N <= 127 must be within bounds of u7"
-        )]
-        Self(Inner {
-            small: ManuallyDrop::new(Small { marker: const { (LENGTH << 1) as u8 } | 1, data }),
-        })
+        Self(Inner { small: ManuallyDrop::new(Small::new(LENGTH, data)) })
     }
 
     /// Creates an empty vector with the specified capacity.
@@ -392,6 +444,10 @@ impl<T, const N: usize> WordVec<T, N> {
             ParsedMarker::Small(len) => {
                 // SAFETY: variant indicated by marker
                 let small = unsafe { &mut *self.0.small };
+
+                // SAFETY: invariant for the data structure.
+                unsafe { assert_unchecked(len as usize <= N) };
+
                 (
                     &mut small.data[..],
                     usize::from(len),
@@ -413,6 +469,10 @@ impl<T, const N: usize> WordVec<T, N> {
                 let slice = unsafe {
                     slice::from_raw_parts_mut(data_start.cast::<MaybeUninit<T>>(), allocated.cap)
                 };
+
+                // SAFETY: invariant for the data structure.
+                unsafe { assert_unchecked(allocated.len <= allocated.cap) };
+
                 (
                     slice,
                     allocated.len,
@@ -581,54 +641,8 @@ impl<T, const N: usize> WordVec<T, N> {
     /// The current marker must be `large`.
     unsafe fn extend_large_iter(&mut self, values: impl Iterator<Item = T>) {
         // SAFETY: function safety invariant
-        let large = unsafe { &mut self.0.large };
-        let (&Allocated { len, mut cap, .. }, _) = large.as_allocated();
-
-        let (hint_min, _) = values.size_hint();
-        let hint_len = len.checked_add(hint_min).expect("new length out of bounds");
-
-        if hint_len > cap {
-            cap = large.grow(hint_len);
-        }
-
-        let mut new_len = len;
-        let mut values = values.fuse();
-
-        while new_len < cap {
-            // This simple loop allows better optimizations subject to the implementation of
-            // `values`.
-            if let Some(item) = values.next() {
-                new_len += 1; // new_len < cap <= usize::MAX, so this will not overflow
-                unsafe {
-                    let dest = Allocated::<T>::data_start(large.0).add(new_len - 1);
-                    dest.write(item);
-                }
-            } else {
-                // capacity is not full but input is exhausted
-                break;
-            }
-        }
-
-        for item in values {
-            new_len = new_len.checked_add(1).expect("new length is out of bounds");
-            if new_len > cap {
-                cap = large.grow(new_len);
-            }
-
-            unsafe {
-                let dest = Allocated::<T>::data_start(large.0).add(new_len - 1);
-                dest.write(item);
-            }
-        }
-
-        // SAFETY:
-        // - large will remain large
-        // - large.0 might have been reallocated, but accessing it through `self` is still correct.
-        // - only one item pushed at a time
-        unsafe {
-            let mut allocated_ptr = self.0.large.0;
-            allocated_ptr.as_mut().len = new_len;
-        }
+        let large = unsafe { &mut *self.0.large };
+        large.extend_iter(values);
     }
 
     /// # Safety
@@ -757,12 +771,7 @@ impl<T, const N: usize> WordVec<T, N> {
             // SAFETY: alloc_ptr is still valid.
             let data_start = unsafe { Allocated::data_start(alloc_ptr) };
 
-            self.0.small = ManuallyDrop::new(Small {
-                marker: u8::try_from(len << 1)
-                    .expect("len <= new_cap == N <= 127, so len * 2 <= 254")
-                    | 1,
-                data:   [const { MaybeUninit::<T>::uninit() }; N],
-            });
+            self.0.small = ManuallyDrop::new(Small::new_uninit(len));
             // SAFETY:
             // - data_start is derived from alloc_ptr, which must not point back to itself
             // - self.0 is now initialized as Small.
@@ -983,6 +992,55 @@ impl<T, const N: usize> WordVec<T, N> {
     }
 }
 
+impl<T: Clone, const N: usize> WordVec<T, N> {
+    /// Creates a new vector with `count` copies of `elem`.
+    pub fn from_elem(elem: T, count: usize) -> Self {
+        if count <= N {
+            let mut data = [const { MaybeUninit::uninit() }; N];
+            for dest in &mut data[..count] {
+                dest.write(elem.clone());
+            }
+
+            Self(Inner { small: ManuallyDrop::new(Small::new(count, data)) })
+        } else {
+            let mut large = Large::new_empty(count);
+            large.extend_iter(iter::repeat_n(elem, count));
+            Self(Inner { large: ManuallyDrop::new(large) })
+        }
+    }
+
+    /// Resizes the vector so that its length is equal to `len`.
+    ///
+    /// If `len` is greater than the current length,
+    /// clones of `value` are appended until the length is `len`.
+    /// Otherwise, the vector is simply truncated.
+    pub fn resize(&mut self, len: usize, value: T) {
+        let (capacity_slice, old_len, mut set_len) = self.as_uninit_slice_with_length_setter();
+        match len.cmp(&old_len) {
+            cmp::Ordering::Equal => {}
+            cmp::Ordering::Less => {
+                // truncation
+                // SAFETY: len < old_len
+                unsafe { set_len.set_len(len) };
+                // SAFETY: ..old_len is previously initialized, and len.. are no longer reachable.
+                unsafe { slice_assume_init_drop(&mut capacity_slice[len..old_len]) };
+            }
+            cmp::Ordering::Greater if len <= capacity_slice.len() => {
+                // extend in-place
+                let mutated_slice = &mut capacity_slice[old_len..len];
+                for dest in mutated_slice {
+                    dest.write(value.clone());
+                }
+                // SAFETY: len > old_len, and mutated_slice is now fully initialized.
+                unsafe { set_len.set_len(len) };
+            }
+            cmp::Ordering::Greater => {
+                self.extend(iter::repeat_n(value, len - old_len));
+            }
+        }
+    }
+}
+
 /// A destructured component of `WordVec` to support setting length.
 ///
 /// See [`WordVec::as_uninit_slice_with_length_setter()`].
@@ -1162,6 +1220,7 @@ pub use into_iter::IntoIter;
 unsafe impl<T: Send, const N: usize> Send for WordVec<T, N> {}
 unsafe impl<T: Sync, const N: usize> Sync for WordVec<T, N> {}
 
+mod macros;
 mod trivial_traits;
 
 mod drain;
@@ -1169,3 +1228,5 @@ pub use drain::Drain;
 
 #[cfg(feature = "serde")]
 mod serde_impl;
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests;
