@@ -28,6 +28,7 @@
 
 #![no_std]
 #![warn(clippy::pedantic)]
+#![deny(missing_docs)]
 
 extern crate alloc;
 
@@ -671,7 +672,8 @@ impl<T, const N: usize> WordVec<T, N> {
     }
 
     /// Reserves the minimum capacity for at least `additional` more elements to
-    /// be inserted in the given `WordVec<T, N>`. Unlike [`reserve`], this will not
+    /// be inserted in the given `WordVec<T, N>`.
+    /// Unlike [`reserve`](Self::reserve), this will not
     /// deliberately over-allocate to speculatively avoid frequent allocations.
     /// After calling `reserve_exact`, capacity will be greater than or equal to
     /// `self.len() + additional`. Does nothing if the capacity is already
@@ -679,7 +681,7 @@ impl<T, const N: usize> WordVec<T, N> {
     ///
     /// Note that the allocator may give the collection more space than it
     /// requests. Therefore, capacity can not be relied upon to be precisely
-    /// minimal. Prefer [`reserve`] if future insertions are expected.
+    /// minimal. Prefer [`reserve`](Self::reserve) if future insertions are expected.
     ///
     /// # Panics
     ///
@@ -975,7 +977,7 @@ impl<T, const N: usize> WordVec<T, N> {
 
         Drain {
             mutated_slice,
-            drain_width: drained_offset,
+            total_drained: drained_offset,
             remain_start: 0,
             remain_end: drained_offset,
             set_len,
@@ -984,6 +986,9 @@ impl<T, const N: usize> WordVec<T, N> {
     }
 }
 
+/// A destructured component of `WordVec` to support setting length.
+///
+/// See [`WordVec::as_uninit_slice_with_length_setter()`].
 pub struct LengthSetter<'a> {
     inner:    LengthSetterInner<'a>,
     #[cfg(debug_assertions)]

@@ -9,7 +9,7 @@ use crate::polyfill::slice_assume_init_drop;
 pub struct Drain<'a, T> {
     // Immutable pointers.
     pub(super) mutated_slice: &'a mut [MaybeUninit<T>],
-    pub(super) drain_width:   usize,
+    pub(super) total_drained: usize,
 
     // Iteration state.
     pub(super) remain_start: usize,
@@ -69,7 +69,7 @@ impl<T> ExactSizeIterator for Drain<'_, T> {
 
 impl<T> FusedIterator for Drain<'_, T> {}
 
-impl<'a, T> Drop for Drain<'a, T> {
+impl<T> Drop for Drain<'_, T> {
     fn drop(&mut self) {
         // Drop the remaining elements in the drained slice,
         // then replace the entire mutated_slice to the eventual value.
@@ -81,17 +81,17 @@ impl<'a, T> Drop for Drain<'a, T> {
             slice_assume_init_drop(&mut self.mutated_slice[self.remain_start..self.remain_end]);
         }
 
-        let count = self.mutated_slice.len() - self.drain_width;
+        let count = self.mutated_slice.len() - self.total_drained;
         // SAFETY: drain_width <= mutated_slice.len() ensured during construction.
         unsafe {
             let mutated_ptr = self.mutated_slice.as_mut_ptr();
-            let src_ptr = mutated_ptr.add(self.drain_width);
+            let src_ptr = mutated_ptr.add(self.total_drained);
             let dest_ptr = mutated_ptr;
             ptr::copy(src_ptr, dest_ptr, count);
         }
 
         unsafe {
-            self.set_len.set_len(self.set_len_base + self.mutated_slice.len() - self.drain_width);
+            self.set_len.set_len(self.set_len_base + self.mutated_slice.len() - self.total_drained);
         }
     }
 }
