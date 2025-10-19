@@ -34,14 +34,11 @@ extern crate alloc;
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
 use core::alloc::Layout;
-use core::borrow::{Borrow, BorrowMut};
-use core::hash::{self, Hash};
 use core::hint::assert_unchecked;
-use core::iter::FusedIterator;
-use core::mem::{self, ManuallyDrop, MaybeUninit, needs_drop};
-use core::ops::{self, Bound, Deref, DerefMut, RangeBounds};
+use core::mem::{self, ManuallyDrop, MaybeUninit};
+use core::ops::{Bound, RangeBounds};
 use core::ptr::{self, NonNull};
-use core::{array, cmp, fmt, iter, slice};
+use core::{cmp, iter, slice};
 
 #[cfg(test)]
 mod tests;
@@ -101,6 +98,20 @@ impl<T, const N: usize> Inner<T, N> {
 struct Small<T, const N: usize> {
     marker: u8,
     data:   [MaybeUninit<T>; N],
+}
+
+impl<T, const N: usize> Small<T, N> {
+    const fn new_uninit(len: usize) -> Self { Self::new(len, [const { MaybeUninit::uninit() }; N]) }
+
+    const fn new(len: usize, data: [MaybeUninit<T>; N]) -> Self {
+        Inner::<T, N>::assert_generics();
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "LENGTH <= N <= 127 must be within bounds of u7"
+        )]
+        Self { marker: (len << 1) as u8 | 1, data }
+    }
 }
 
 #[cfg(target_endian = "big")]
@@ -170,6 +181,55 @@ impl<T> Large<T> {
         }
     }
 
+    fn extend_iter(&mut self, values: impl Iterator<Item = T>) {
+        let (&Allocated { len, mut cap, .. }, _) = self.as_allocated();
+
+        let (hint_min, _) = values.size_hint();
+        let hint_len = len.checked_add(hint_min).expect("new length out of bounds");
+
+        if hint_len > cap {
+            cap = self.grow(hint_len);
+        }
+
+        let mut new_len = len;
+        let mut values = values.fuse();
+
+        while new_len < cap {
+            // This simple loop allows better optimizations subject to the implementation of
+            // `values`.
+            if let Some(item) = values.next() {
+                new_len += 1; // new_len < cap <= usize::MAX, so this will not overflow
+                unsafe {
+                    let dest = Allocated::<T>::data_start(self.0).add(new_len - 1);
+                    dest.write(item);
+                }
+            } else {
+                // capacity is not full but input is exhausted
+                break;
+            }
+        }
+
+        for item in values {
+            new_len = new_len.checked_add(1).expect("new length is out of bounds");
+            if new_len > cap {
+                cap = self.grow(new_len);
+            }
+
+            unsafe {
+                let dest = Allocated::<T>::data_start(self.0).add(new_len - 1);
+                dest.write(item);
+            }
+        }
+
+        // SAFETY:
+        // - self.0 might have been reallocated, but accessing it through `self` is still correct.
+        // - only one item pushed at a time
+        unsafe {
+            let mut allocated_ptr = self.0;
+            allocated_ptr.as_mut().len = new_len;
+        }
+    }
+
     /// Create a new `Large` with a new allocation,
     /// and move the data from `src` to the new allocation.
     ///
@@ -206,7 +266,7 @@ impl<T> Large<T> {
 }
 
 /// This struct only contains the header (and padding) of the heap allocation.
-/// Due to provenance, `_data_start` cannot be directly converted to a slice reference;
+/// Due to provenance, `data_start` cannot be directly converted to a slice reference;
 /// the slice must always be derived from the allocation pointer (`NonNull<Allocated<T>>`)
 /// directly.
 #[repr(C)]
@@ -273,12 +333,7 @@ impl<T, const N: usize> WordVec<T, N> {
     pub const fn new() -> Self {
         Inner::<T, N>::assert_generics();
 
-        Self(Inner {
-            small: ManuallyDrop::new(Small {
-                marker: 1,
-                data:   [const { MaybeUninit::uninit() }; N],
-            }),
-        })
+        Self(Inner { small: ManuallyDrop::new(Small::new_uninit(0)) })
     }
 
     /// Creates a new **inlined** vector with specified data.
@@ -305,13 +360,7 @@ impl<T, const N: usize> WordVec<T, N> {
         }
         mem::forget(values); // do not drop values; they have already been moved
 
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "LENGTH <= N <= 127 must be within bounds of u7"
-        )]
-        Self(Inner {
-            small: ManuallyDrop::new(Small { marker: const { (LENGTH << 1) as u8 } | 1, data }),
-        })
+        Self(Inner { small: ManuallyDrop::new(Small::new(LENGTH, data)) })
     }
 
     /// Creates an empty vector with the specified capacity.
@@ -395,6 +444,10 @@ impl<T, const N: usize> WordVec<T, N> {
             ParsedMarker::Small(len) => {
                 // SAFETY: variant indicated by marker
                 let small = unsafe { &mut *self.0.small };
+
+                // SAFETY: invariant for the data structure.
+                unsafe { assert_unchecked(len as usize <= N) };
+
                 (
                     &mut small.data[..],
                     usize::from(len),
@@ -416,6 +469,10 @@ impl<T, const N: usize> WordVec<T, N> {
                 let slice = unsafe {
                     slice::from_raw_parts_mut(data_start.cast::<MaybeUninit<T>>(), allocated.cap)
                 };
+
+                // SAFETY: invariant for the data structure.
+                unsafe { assert_unchecked(allocated.len <= allocated.cap) };
+
                 (
                     slice,
                     allocated.len,
@@ -584,54 +641,8 @@ impl<T, const N: usize> WordVec<T, N> {
     /// The current marker must be `large`.
     unsafe fn extend_large_iter(&mut self, values: impl Iterator<Item = T>) {
         // SAFETY: function safety invariant
-        let large = unsafe { &mut self.0.large };
-        let (&Allocated { len, mut cap, .. }, _) = large.as_allocated();
-
-        let (hint_min, _) = values.size_hint();
-        let hint_len = len.checked_add(hint_min).expect("new length out of bounds");
-
-        if hint_len > cap {
-            cap = large.grow(hint_len);
-        }
-
-        let mut new_len = len;
-        let mut values = values.fuse();
-
-        while new_len < cap {
-            // This simple loop allows better optimizations subject to the implementation of
-            // `values`.
-            if let Some(item) = values.next() {
-                new_len += 1; // new_len < cap <= usize::MAX, so this will not overflow
-                unsafe {
-                    let dest = Allocated::<T>::data_start(large.0).add(new_len - 1);
-                    dest.write(item);
-                }
-            } else {
-                // capacity is not full but input is exhausted
-                break;
-            }
-        }
-
-        for item in values {
-            new_len = new_len.checked_add(1).expect("new length is out of bounds");
-            if new_len > cap {
-                cap = large.grow(new_len);
-            }
-
-            unsafe {
-                let dest = Allocated::<T>::data_start(large.0).add(new_len - 1);
-                dest.write(item);
-            }
-        }
-
-        // SAFETY:
-        // - large will remain large
-        // - large.0 might have been reallocated, but accessing it through `self` is still correct.
-        // - only one item pushed at a time
-        unsafe {
-            let mut allocated_ptr = self.0.large.0;
-            allocated_ptr.as_mut().len = new_len;
-        }
+        let large = unsafe { &mut *self.0.large };
+        large.extend_iter(values);
     }
 
     /// # Safety
@@ -760,12 +771,7 @@ impl<T, const N: usize> WordVec<T, N> {
             // SAFETY: alloc_ptr is still valid.
             let data_start = unsafe { Allocated::data_start(alloc_ptr) };
 
-            self.0.small = ManuallyDrop::new(Small {
-                marker: u8::try_from(len << 1)
-                    .expect("len <= new_cap == N <= 127, so len * 2 <= 254")
-                    | 1,
-                data:   [const { MaybeUninit::<T>::uninit() }; N],
-            });
+            self.0.small = ManuallyDrop::new(Small::new_uninit(len));
             // SAFETY:
             // - data_start is derived from alloc_ptr, which must not point back to itself
             // - self.0 is now initialized as Small.
@@ -984,6 +990,86 @@ impl<T, const N: usize> WordVec<T, N> {
             set_len_base: start_drain,
         }
     }
+
+    /// Resizes the vector so that its length is equal to `len`.
+    ///
+    /// If `len` is greater than the current length,
+    /// `value_fn` is called until the length is `len`.
+    /// Otherwise, the vector is simply truncated.
+    pub fn resize_with(&mut self, len: usize, mut value_fn: impl FnMut() -> T) {
+        let (capacity_slice, old_len, mut set_len) = self.as_uninit_slice_with_length_setter();
+        match len.cmp(&old_len) {
+            cmp::Ordering::Equal => {}
+            cmp::Ordering::Less => {
+                // truncation
+                // SAFETY: len < old_len
+                unsafe { set_len.set_len(len) };
+                // SAFETY: ..old_len is previously initialized, and len.. are no longer reachable.
+                unsafe { slice_assume_init_drop(&mut capacity_slice[len..old_len]) };
+            }
+            cmp::Ordering::Greater if len <= capacity_slice.len() => {
+                // extend in-place
+                unwind_safe_write_slice(&mut capacity_slice[old_len..len], |_| value_fn());
+                // SAFETY: len > old_len, and mutated_slice is now fully initialized.
+                unsafe { set_len.set_len(len) };
+            }
+            cmp::Ordering::Greater => {
+                self.extend(iter::repeat_with(value_fn).take(len - old_len));
+            }
+        }
+    }
+}
+
+impl<T: Clone, const N: usize> WordVec<T, N> {
+    /// Creates a new vector with `count` copies of `elem`.
+    pub fn from_elem(elem: T, count: usize) -> Self {
+        if count <= N {
+            let mut data = [const { MaybeUninit::uninit() }; N];
+            unwind_safe_write_slice(&mut data[..count], |_| elem.clone());
+
+            Self(Inner { small: ManuallyDrop::new(Small::new(count, data)) })
+        } else {
+            let mut large = Large::new_empty(count);
+            large.extend_iter(iter::repeat_n(elem, count));
+            Self(Inner { large: ManuallyDrop::new(large) })
+        }
+    }
+
+    /// Resizes the vector so that its length is equal to `len`.
+    ///
+    /// If `len` is greater than the current length,
+    /// clones of `value` are appended until the length is `len`.
+    /// Otherwise, the vector is simply truncated.
+    pub fn resize(&mut self, len: usize, value: T) { self.resize_with(len, || value.clone()); }
+}
+
+/// Fills `slice` with results of `write_elem`,
+/// with proper drop handling of initialized values when `write_elem` panics.
+fn unwind_safe_write_slice<T>(
+    slice: &mut [MaybeUninit<T>],
+    mut write_elem: impl FnMut(usize) -> T,
+) {
+    struct DropGuard<'a, T> {
+        slice: &'a mut [MaybeUninit<T>],
+        len:   usize,
+    }
+
+    impl<T> Drop for DropGuard<'_, T> {
+        fn drop(&mut self) {
+            // SAFETY: only the first `init_len` elements are initialized.
+            unsafe { slice_assume_init_drop(&mut self.slice[..self.len]) };
+        }
+    }
+
+    let mut guard = DropGuard { slice, len: 0 };
+
+    while guard.len < guard.slice.len() {
+        let value = write_elem(guard.len);
+        guard.slice[guard.len].write(value);
+        guard.len += 1;
+    }
+
+    mem::forget(guard);
 }
 
 /// A destructured component of `WordVec` to support setting length.
@@ -1062,10 +1148,6 @@ fn shift_right_once<T>(slice: &mut [MaybeUninit<T>]) {
     unsafe {
         ptr::copy(ptr, ptr.add(1), moved_items);
     }
-}
-
-impl<T, const N: usize> Default for WordVec<T, N> {
-    fn default() -> Self { Self::new() }
 }
 
 impl<T, const LENGTH: usize, const N: usize> From<[T; LENGTH]> for WordVec<T, N> {
@@ -1162,199 +1244,20 @@ impl<T, const N: usize> Extend<T> for WordVec<T, N> {
     }
 }
 
-impl<T, const N: usize> FromIterator<T> for WordVec<T, N> {
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut v = Self::default();
-        v.extend(iter);
-        v
-    }
-}
-
-impl<T: fmt::Debug, const N: usize> fmt::Debug for WordVec<T, N> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { fmt::Debug::fmt(self.as_slice(), f) }
-}
-
-impl<T, const N: usize> Deref for WordVec<T, N> {
-    type Target = [T];
-
-    fn deref(&self) -> &[T] { self.as_slice() }
-}
-
-impl<T, const N: usize> DerefMut for WordVec<T, N> {
-    fn deref_mut(&mut self) -> &mut [T] { self.as_mut_slice() }
-}
-
-impl<T, const N: usize> AsRef<[T]> for WordVec<T, N> {
-    fn as_ref(&self) -> &[T] { self.as_slice() }
-}
-
-impl<T, const N: usize> AsMut<[T]> for WordVec<T, N> {
-    fn as_mut(&mut self) -> &mut [T] { self.as_mut_slice() }
-}
-
-impl<T, const N: usize> Borrow<[T]> for WordVec<T, N> {
-    fn borrow(&self) -> &[T] { self.as_slice() }
-}
-
-impl<T, const N: usize> BorrowMut<[T]> for WordVec<T, N> {
-    fn borrow_mut(&mut self) -> &mut [T] { self.as_mut_slice() }
-}
-
-impl<T, const N: usize, Idx> ops::Index<Idx> for WordVec<T, N>
-where
-    [T]: ops::Index<Idx>,
-{
-    type Output = <[T] as ops::Index<Idx>>::Output;
-
-    fn index(&self, index: Idx) -> &Self::Output { self.as_slice().index(index) }
-}
-
-impl<T, const N: usize, Idx> ops::IndexMut<Idx> for WordVec<T, N>
-where
-    [T]: ops::IndexMut<Idx>,
-{
-    fn index_mut(&mut self, index: Idx) -> &mut Self::Output {
-        self.as_mut_slice().index_mut(index)
-    }
-}
-
-impl<T: PartialEq, const N: usize> PartialEq for WordVec<T, N> {
-    fn eq(&self, other: &Self) -> bool { self.as_slice() == other.as_slice() }
-}
-
-impl<T: Eq, const N: usize> Eq for WordVec<T, N> {}
-
-impl<T: PartialOrd, const N: usize> PartialOrd for WordVec<T, N> {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        self.as_slice().partial_cmp(other.as_slice())
-    }
-}
-
-impl<T: Ord, const N: usize> Ord for WordVec<T, N> {
-    fn cmp(&self, other: &Self) -> cmp::Ordering { self.as_slice().cmp(other.as_slice()) }
-}
-
-impl<T: Hash, const N: usize> Hash for WordVec<T, N> {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) { self.as_slice().hash(state); }
-}
-
-impl<'a, T, const N: usize> IntoIterator for &'a WordVec<T, N> {
-    type Item = &'a T;
-    type IntoIter = slice::Iter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter { self.as_slice().iter() }
-}
-
-impl<'a, T, const N: usize> IntoIterator for &'a mut WordVec<T, N> {
-    type Item = &'a mut T;
-    type IntoIter = slice::IterMut<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter { self.as_mut_slice().iter_mut() }
-}
-
-impl<T, const N: usize> IntoIterator for WordVec<T, N> {
-    type Item = T;
-    type IntoIter = IntoIter<T, N>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        let mut this = ManuallyDrop::new(self); // the real destructor is called by `IntoIter`.
-        match this.0.parse_marker() {
-            ParsedMarker::Small(len) => {
-                // SAFETY: indicated by marker
-                let small = unsafe { ManuallyDrop::take(&mut this.0.small) };
-                let data = small.data;
-                let valid = data.into_iter().take(len.into());
-                IntoIter(IntoIterInner::Small(valid.into_iter()))
-            }
-            ParsedMarker::Large => {
-                // SAFETY: indicated by marker
-                let alloc = unsafe { this.0.large.0 };
-                IntoIter(IntoIterInner::Large { alloc, start: 0 })
-            }
-        }
-    }
-}
-
-/// Implements [`IntoIterator`] for [`WordVec`].
-pub struct IntoIter<T, const N: usize>(IntoIterInner<T, N>);
-
-enum IntoIterInner<T, const N: usize> {
-    Small(iter::Take<array::IntoIter<MaybeUninit<T>, N>>),
-    Large { alloc: NonNull<Allocated<T>>, start: usize },
-}
-
-impl<T, const N: usize> Iterator for IntoIter<T, N> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match &mut self.0 {
-            IntoIterInner::Small(iter) => {
-                // SAFETY: only initialized values are taken
-                iter.next().map(|uninit| unsafe { uninit.assume_init() })
-            }
-            IntoIterInner::Large { alloc, start } => {
-                // SAFETY: the header is always valid before drop.
-                let len = unsafe { alloc.as_mut() }.len;
-
-                let index = *start;
-                if index >= len {
-                    return None;
-                }
-                *start = index + 1;
-
-                let value = unsafe { Allocated::data_start(*alloc) };
-                // SAFETY: index was not consumed before this function was called.
-                let value = unsafe { ptr::read(value.add(index)) };
-                Some(value)
-            }
-        }
-    }
-}
-
-// Small: array::IntoIter implements FusedIterator.
-// Large: we check `index >= len` before incrementing (not doing so may lead to UB caused by
-// overflow).
-impl<T, const N: usize> FusedIterator for IntoIter<T, N> {}
-
-impl<T, const N: usize> Drop for IntoIter<T, N> {
-    fn drop(&mut self) {
-        match &mut self.0 {
-            IntoIterInner::Small(iter) => {
-                // SAFETY: only initialized values are taken
-                iter.by_ref().for_each(|uninit| drop(unsafe { uninit.assume_init() }));
-            }
-            IntoIterInner::Large { alloc, start } => {
-                // SAFETY: the header is always valid before drop.
-                let &mut Allocated { len, cap, .. } = unsafe { alloc.as_mut() };
-
-                if needs_drop::<T>() {
-                    let value = unsafe { Allocated::data_start(*alloc) };
-                    // SAFETY: `start` <= `len`.
-                    let start_ptr = unsafe { value.add(*start) };
-                    // SAFETY: All items in the range start..len are still initialized and need
-                    // dropping.
-                    unsafe {
-                        let to_drop = ptr::slice_from_raw_parts_mut(start_ptr, len - *start);
-                        ptr::drop_in_place(to_drop);
-                    }
-                }
-
-                let layout = Large::<T>::new_layout(cap);
-                // SAFETY: alloc is valid before dropped; layout is provided by the header itself.
-                unsafe {
-                    dealloc(alloc.as_ptr().cast(), layout);
-                }
-            }
-        }
-    }
-}
+mod into_iter;
+pub use into_iter::IntoIter;
 
 // SAFETY: These are equivalent to the safety of `Vec<T>`.
 unsafe impl<T: Send, const N: usize> Send for WordVec<T, N> {}
 unsafe impl<T: Sync, const N: usize> Sync for WordVec<T, N> {}
+
+mod macros;
+mod trivial_traits;
 
 mod drain;
 pub use drain::Drain;
 
 #[cfg(feature = "serde")]
 mod serde_impl;
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests;
