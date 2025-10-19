@@ -1,8 +1,8 @@
 /// Creates a [`WordVec`] containing the elements.
 ///
 /// Like the std [`vec!`] macro,
-/// the `wordvec![x; n]` syntax always creates an additional clone of `x`,
-/// even if `n` is zero.
+/// the `wordvec![x; n]` syntax always evaluates `x` once,
+/// even if `n` is zero, then clones `x` for `n` times.
 ///
 /// # Examples
 /// ```

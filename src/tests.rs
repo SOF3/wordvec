@@ -539,37 +539,37 @@ fn test_drain_long_long_short_early_drop_back() {
     assert_eq!(wv.as_slice(), &[0, 1, 2, 6, 7]);
 }
 
-#[test]
-fn test_resize_unchanged() {
-    let mut wv = (0..4).collect::<WordVec<_, 5>>();
-    wv.resize(4, 9);
-    assert_eq!(wv.as_slice(), &[0, 1, 2, 3]);
+fn assert_resize<const N: usize>(
+    initial_len: usize,
+    resize_len: usize,
+    expect_slice: &[i32],
+    expect_resize_drops: usize,
+) {
+    let counter = &Cell::new(0);
+    let mut wv = (0..initial_len)
+        .map(|i| AssertDrop { string: i.to_string(), counter })
+        .collect::<WordVec<_, N>>();
+    wv.resize_with(resize_len, || AssertDrop { string: "9".to_string(), counter });
+    assert_eq!(
+        wv.as_slice().iter().map(|d| d.string.parse::<i32>().unwrap()).collect::<Vec<_>>(),
+        expect_slice
+    );
+    assert_eq!(counter.get(), expect_resize_drops);
+    drop(wv);
+    assert_eq!(counter.get(), initial_len.max(resize_len));
 }
 
 #[test]
-fn test_resize_truncate() {
-    let mut wv = (0..4).collect::<WordVec<_, 5>>();
-    wv.resize(2, 9);
-    assert_eq!(wv.as_slice(), &[0, 1]);
-}
+fn test_resize_unchanged() { assert_resize::<5>(4, 4, &[0, 1, 2, 3], 0); }
 
 #[test]
-fn test_resize_extend_in_place() {
-    let mut wv = (0..2).collect::<WordVec<_, 5>>();
-    wv.resize(5, 9);
-    assert_eq!(wv.as_slice(), &[0, 1, 9, 9, 9]);
-}
+fn test_resize_truncate() { assert_resize::<5>(4, 2, &[0, 1], 2); }
 
 #[test]
-fn test_resize_extend_grow_small() {
-    let mut wv = (0..2).collect::<WordVec<_, 4>>();
-    wv.resize(5, 9);
-    assert_eq!(wv.as_slice(), &[0, 1, 9, 9, 9]);
-}
+fn test_resize_extend_in_place() { assert_resize::<5>(2, 5, &[0, 1, 9, 9, 9], 0); }
 
 #[test]
-fn test_resize_extend_grow_large() {
-    let mut wv = (0..2).collect::<WordVec<_, 1>>();
-    wv.resize(5, 9);
-    assert_eq!(wv.as_slice(), &[0, 1, 9, 9, 9]);
-}
+fn test_resize_extend_grow_small() { assert_resize::<4>(2, 5, &[0, 1, 9, 9, 9], 0); }
+
+#[test]
+fn test_resize_extend_grow_large() { assert_resize::<1>(2, 5, &[0, 1, 9, 9, 9], 0); }

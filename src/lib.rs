@@ -990,6 +990,34 @@ impl<T, const N: usize> WordVec<T, N> {
             set_len_base: start_drain,
         }
     }
+
+    /// Resizes the vector so that its length is equal to `len`.
+    ///
+    /// If `len` is greater than the current length,
+    /// `value_fn` is called until the length is `len`.
+    /// Otherwise, the vector is simply truncated.
+    pub fn resize_with(&mut self, len: usize, mut value_fn: impl FnMut() -> T) {
+        let (capacity_slice, old_len, mut set_len) = self.as_uninit_slice_with_length_setter();
+        match len.cmp(&old_len) {
+            cmp::Ordering::Equal => {}
+            cmp::Ordering::Less => {
+                // truncation
+                // SAFETY: len < old_len
+                unsafe { set_len.set_len(len) };
+                // SAFETY: ..old_len is previously initialized, and len.. are no longer reachable.
+                unsafe { slice_assume_init_drop(&mut capacity_slice[len..old_len]) };
+            }
+            cmp::Ordering::Greater if len <= capacity_slice.len() => {
+                // extend in-place
+                unwind_safe_write_slice(&mut capacity_slice[old_len..len], |_| value_fn());
+                // SAFETY: len > old_len, and mutated_slice is now fully initialized.
+                unsafe { set_len.set_len(len) };
+            }
+            cmp::Ordering::Greater => {
+                self.extend(iter::repeat_with(value_fn).take(len - old_len));
+            }
+        }
+    }
 }
 
 impl<T: Clone, const N: usize> WordVec<T, N> {
@@ -997,9 +1025,7 @@ impl<T: Clone, const N: usize> WordVec<T, N> {
     pub fn from_elem(elem: T, count: usize) -> Self {
         if count <= N {
             let mut data = [const { MaybeUninit::uninit() }; N];
-            for dest in &mut data[..count] {
-                dest.write(elem.clone());
-            }
+            unwind_safe_write_slice(&mut data[..count], |_| elem.clone());
 
             Self(Inner { small: ManuallyDrop::new(Small::new(count, data)) })
         } else {
@@ -1014,31 +1040,36 @@ impl<T: Clone, const N: usize> WordVec<T, N> {
     /// If `len` is greater than the current length,
     /// clones of `value` are appended until the length is `len`.
     /// Otherwise, the vector is simply truncated.
-    pub fn resize(&mut self, len: usize, value: T) {
-        let (capacity_slice, old_len, mut set_len) = self.as_uninit_slice_with_length_setter();
-        match len.cmp(&old_len) {
-            cmp::Ordering::Equal => {}
-            cmp::Ordering::Less => {
-                // truncation
-                // SAFETY: len < old_len
-                unsafe { set_len.set_len(len) };
-                // SAFETY: ..old_len is previously initialized, and len.. are no longer reachable.
-                unsafe { slice_assume_init_drop(&mut capacity_slice[len..old_len]) };
-            }
-            cmp::Ordering::Greater if len <= capacity_slice.len() => {
-                // extend in-place
-                let mutated_slice = &mut capacity_slice[old_len..len];
-                for dest in mutated_slice {
-                    dest.write(value.clone());
-                }
-                // SAFETY: len > old_len, and mutated_slice is now fully initialized.
-                unsafe { set_len.set_len(len) };
-            }
-            cmp::Ordering::Greater => {
-                self.extend(iter::repeat_n(value, len - old_len));
-            }
+    pub fn resize(&mut self, len: usize, value: T) { self.resize_with(len, || value.clone()); }
+}
+
+/// Fills `slice` with results of `write_elem`,
+/// with proper drop handling of initialized values when `write_elem` panics.
+fn unwind_safe_write_slice<T>(
+    slice: &mut [MaybeUninit<T>],
+    mut write_elem: impl FnMut(usize) -> T,
+) {
+    struct DropGuard<'a, T> {
+        slice: &'a mut [MaybeUninit<T>],
+        len:   usize,
+    }
+
+    impl<T> Drop for DropGuard<'_, T> {
+        fn drop(&mut self) {
+            // SAFETY: only the first `init_len` elements are initialized.
+            unsafe { slice_assume_init_drop(&mut self.slice[..self.len]) };
         }
     }
+
+    let mut guard = DropGuard { slice, len: 0 };
+
+    while guard.len < guard.slice.len() {
+        let value = write_elem(guard.len);
+        guard.slice[guard.len].write(value);
+        guard.len += 1;
+    }
+
+    mem::forget(guard);
 }
 
 /// A destructured component of `WordVec` to support setting length.
