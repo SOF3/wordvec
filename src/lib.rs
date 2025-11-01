@@ -58,6 +58,8 @@ pub use into_iter::IntoIter;
 mod drain;
 pub use drain::Drain;
 
+mod retain;
+
 #[cfg(feature = "serde")]
 mod serde_impl;
 #[cfg(all(test, feature = "serde"))]
@@ -741,6 +743,23 @@ impl<T, const N: usize> WordVec<T, N> {
             remain_end: drained_offset,
             set_len,
             set_len_base: start_drain,
+        }
+    }
+
+    /// Retains only the elements specified by the predicate.
+    ///
+    /// In other words, remove all elements `e` for which `predicate(&mut e)` returns false.
+    /// This method operates in place, visiting each element exactly once in the original order,
+    /// and preserves the order of the retained elements.
+    pub fn retain<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&mut T) -> bool,
+    {
+        let mut retain = retain::Retain::new(self);
+        loop {
+            if let retain::NextResult::Exhausted = retain.next(&mut predicate) {
+                break;
+            }
         }
     }
 

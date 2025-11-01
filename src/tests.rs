@@ -1,6 +1,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
+use core::panic::AssertUnwindSafe;
 
 use crate::WordVec;
 
@@ -538,6 +539,98 @@ fn test_drain_long_long_short_early_drop_back() {
     assert_eq!(drained, [5]);
     assert_eq!(wv.as_slice(), &[0, 1, 2, 6, 7]);
 }
+
+#[test]
+fn test_retain_empty() {
+    let mut wv = WordVec::<i32, 4>::new();
+    wv.retain(|_| unreachable!());
+    assert!(wv.as_slice().is_empty());
+}
+
+#[test]
+fn test_retain_everything() {
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..3).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 4>>();
+    wv.retain(|_| true);
+    assert_eq!(counter.get(), 0);
+    assert_eq!(wv.iter().map(|d| d.string.as_str()).collect::<Vec<_>>(), &["0", "1", "2"]);
+    drop(wv);
+    assert_eq!(counter.get(), 3);
+}
+
+#[test]
+fn test_retain_nothing() {
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..3).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 4>>();
+    wv.retain(|_| false);
+    assert_eq!(counter.get(), 3);
+    assert!(wv.as_slice().is_empty());
+}
+
+#[test]
+fn test_retain_tft() {
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..3).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 4>>();
+    let mut retain_seq = [true, false, true].into_iter();
+    wv.retain(|_| retain_seq.next().unwrap());
+    assert_eq!(counter.get(), 1);
+    assert_eq!(wv.iter().map(|d| d.string.as_str()).collect::<Vec<_>>(), &["0", "2"]);
+    drop(wv);
+    assert_eq!(counter.get(), 3);
+}
+
+#[test]
+fn test_retain_ftf() {
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..3).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 4>>();
+    let mut retain_seq = [false, true, false].into_iter();
+    wv.retain(|_| retain_seq.next().unwrap());
+    assert_eq!(counter.get(), 2);
+    assert_eq!(wv.iter().map(|d| d.string.as_str()).collect::<Vec<_>>(), &["1"]);
+    drop(wv);
+    assert_eq!(counter.get(), 3);
+}
+
+fn test_retain_panic(retain_prev: bool, expect_retain_drops: usize, expect_after_retain: &[&str]) {
+    extern crate std;
+
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..3).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 4>>();
+
+    _ = std::panic::catch_unwind({
+        let mut wv = AssertUnwindSafe(&mut wv);
+        move || {
+            let mut next_index = 0;
+            wv.retain(|_| {
+                let index = next_index;
+                next_index += 1;
+
+                #[expect(clippy::manual_assert, reason = "clarity")]
+                if index == 1 {
+                    panic!("intentional panic");
+                }
+
+                retain_prev
+            });
+        }
+    });
+
+    assert_eq!(counter.get(), expect_retain_drops);
+    assert_eq!(wv.iter().map(|d| d.string.as_str()).collect::<Vec<_>>(), expect_after_retain);
+    drop(wv);
+    assert_eq!(counter.get(), 3);
+}
+
+#[test]
+fn test_retain_shifted_panic() { test_retain_panic(false, 1, &["1", "2"]); }
+
+#[test]
+fn test_retain_unshifted_panic() { test_retain_panic(true, 0, &["0", "1", "2"]); }
 
 fn assert_resize<const N: usize>(
     initial_len: usize,
