@@ -92,3 +92,25 @@ pub(super) enum NextResult<T> {
     Retained,
     Removed(T),
 }
+
+pub(super) struct ExtractIf<'a, T, F> {
+    pub(super) retain:        Retain<'a, T>,
+    pub(super) should_remove: F,
+}
+
+impl<T, F> Iterator for ExtractIf<'_, T, F>
+where
+    F: FnMut(&mut T) -> bool,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            return match self.retain.next(|elem| !(self.should_remove)(elem)) {
+                NextResult::Exhausted => None,
+                NextResult::Retained => continue,
+                NextResult::Removed(item) => Some(item),
+            };
+        }
+    }
+}
