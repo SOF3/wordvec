@@ -1,6 +1,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
+use core::mem;
+use core::panic::AssertUnwindSafe;
 
 use crate::WordVec;
 
@@ -538,6 +540,161 @@ fn test_drain_long_long_short_early_drop_back() {
     assert_eq!(drained, [5]);
     assert_eq!(wv.as_slice(), &[0, 1, 2, 6, 7]);
 }
+
+fn test_retain_with<const N: usize>(
+    initial_len: usize,
+    mut predicate: impl FnMut(&str) -> bool,
+    expect_retain_drops: usize,
+    expect_after_retain: &[&str],
+    retain_fn: impl FnOnce(&mut WordVec<AssertDrop<'_>, N>, &mut dyn FnMut(&mut AssertDrop<'_>) -> bool),
+) {
+    let counter = &Cell::new(0);
+    let mut wv = (0..initial_len)
+        .map(|i| AssertDrop { string: i.to_string(), counter })
+        .collect::<WordVec<_, N>>();
+    retain_fn(&mut wv, &mut |d| predicate(d.string.as_str()));
+    assert_eq!(counter.get(), expect_retain_drops);
+    assert_eq!(wv.iter().map(|d| d.string.as_str()).collect::<Vec<_>>(), expect_after_retain);
+    drop(wv);
+    assert_eq!(counter.get(), initial_len);
+}
+
+fn test_retain<const N: usize>(
+    initial_len: usize,
+    mut predicate: impl FnMut(&str) -> bool,
+    expect_retain_drops: usize,
+    expect_after_retain: &[&str],
+) {
+    test_retain_with::<N>(
+        initial_len,
+        &mut predicate,
+        expect_retain_drops,
+        expect_after_retain,
+        |wv, predicate| wv.retain(|d| predicate(d)),
+    );
+}
+
+fn test_extract_if<const N: usize>(
+    initial_len: usize,
+    mut predicate: impl FnMut(&str) -> bool,
+    expect_retain_drops: usize,
+    expect_after_retain: &[&str],
+) {
+    test_retain_with::<N>(
+        initial_len,
+        &mut predicate,
+        expect_retain_drops,
+        expect_after_retain,
+        |wv, predicate| wv.extract_if(|d| !predicate(d)).for_each(drop),
+    );
+}
+
+#[test]
+fn test_retain_empty() { test_retain::<4>(0, |_| unreachable!(), 0, &[]); }
+
+#[test]
+fn test_retain_everything() { test_retain::<4>(3, |_| true, 0, &["0", "1", "2"]); }
+
+#[test]
+fn test_retain_nothing() { test_retain::<4>(3, |_| false, 3, &[]); }
+
+#[test]
+fn test_retain_tft() {
+    let mut retain_seq = [true, false, true].into_iter();
+    test_retain::<4>(3, |_| retain_seq.next().unwrap(), 1, &["0", "2"]);
+}
+
+#[test]
+fn test_retain_ftf() {
+    let mut retain_seq = [false, true, false].into_iter();
+    test_retain::<4>(3, |_| retain_seq.next().unwrap(), 2, &["1"]);
+}
+
+fn test_retain_panic(retain_prev: bool, expect_retain_drops: usize, expect_after_retain: &[&str]) {
+    extern crate std;
+
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..3).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 4>>();
+
+    _ = std::panic::catch_unwind({
+        let mut wv = AssertUnwindSafe(&mut wv);
+        move || {
+            let mut next_index = 0;
+            wv.retain(|_| {
+                let index = next_index;
+                next_index += 1;
+
+                #[expect(clippy::manual_assert, reason = "clarity")]
+                if index == 1 {
+                    panic!("intentional panic");
+                }
+
+                retain_prev
+            });
+        }
+    });
+
+    assert_eq!(counter.get(), expect_retain_drops);
+    assert_eq!(wv.iter().map(|d| d.string.as_str()).collect::<Vec<_>>(), expect_after_retain);
+    drop(wv);
+    assert_eq!(counter.get(), 3);
+}
+
+#[test]
+fn test_retain_shifted_panic() { test_retain_panic(false, 1, &["1", "2"]); }
+
+#[test]
+fn test_retain_unshifted_panic() { test_retain_panic(true, 0, &["0", "1", "2"]); }
+
+#[test]
+fn test_extract_if_empty() { test_extract_if::<4>(0, |_| unreachable!(), 0, &[]); }
+
+#[test]
+fn test_extract_if_everything() { test_extract_if::<4>(3, |_| true, 0, &["0", "1", "2"]); }
+
+#[test]
+fn test_extract_if_nothing() { test_extract_if::<4>(3, |_| false, 3, &[]); }
+
+#[test]
+fn test_extract_if_tft() {
+    let mut extract_if_seq = [true, false, true].into_iter();
+    test_extract_if::<4>(3, |_| extract_if_seq.next().unwrap(), 1, &["0", "2"]);
+}
+
+#[test]
+fn test_extract_if_ftf() {
+    let mut extract_if_seq = [false, true, false].into_iter();
+    test_extract_if::<4>(3, |_| extract_if_seq.next().unwrap(), 2, &["1"]);
+}
+
+fn test_extract_if_drop(
+    retain_first: bool,
+    expect_extract_result: &str,
+    expect_retain_drops: usize,
+    expect_after_retain: &[&str],
+) {
+    let counter = &Cell::new(0);
+    let mut wv =
+        (0..3).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 4>>();
+
+    {
+        let mut retain = retain_first;
+        let mut iter = wv.extract_if(|_| !mem::replace(&mut retain, false));
+        assert_eq!(iter.next().unwrap().string, expect_extract_result);
+    }
+
+    assert_eq!(counter.get(), expect_retain_drops);
+    assert_eq!(wv.iter().map(|d| d.string.as_str()).collect::<Vec<_>>(), expect_after_retain);
+    drop(wv);
+    assert_eq!(counter.get(), 3);
+}
+
+#[test]
+fn test_extract_if_shifted_drop() { test_extract_if_drop(true, "1", 1, &["0", "2"]); }
+
+#[test]
+fn test_extract_if_unshifted_drop() { test_extract_if_drop(false, "0", 1, &["1", "2"]); }
 
 fn assert_resize<const N: usize>(
     initial_len: usize,

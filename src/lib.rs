@@ -58,6 +58,8 @@ pub use into_iter::IntoIter;
 mod drain;
 pub use drain::Drain;
 
+mod retain;
+
 #[cfg(feature = "serde")]
 mod serde_impl;
 #[cfg(all(test, feature = "serde"))]
@@ -742,6 +744,42 @@ impl<T, const N: usize> WordVec<T, N> {
             set_len,
             set_len_base: start_drain,
         }
+    }
+
+    /// Retains only the elements specified by the predicate.
+    ///
+    /// In other words, remove all elements `e` for which `predicate(&mut e)` returns false.
+    /// This method operates in place, visiting each element exactly once in the original order,
+    /// and preserves the order of the retained elements.
+    pub fn retain<F>(&mut self, mut should_retain: F)
+    where
+        F: FnMut(&mut T) -> bool,
+    {
+        let mut retain = retain::Retain::new(self);
+        loop {
+            if let retain::NextResult::Exhausted = retain.next(&mut should_retain) {
+                break;
+            }
+        }
+    }
+
+    /// Creates an iterator which uses a closure to determine if an element should be removed.
+    ///
+    /// If the closure returns `true`, the element is removed from the vector
+    /// and yielded. If the closure returns `false`, or panics, the element
+    /// remains in the vector and will not be yielded.
+    ///
+    /// If the returned iterator is not exhausted, e.g. because it is dropped without iterating
+    /// or the iteration short-circuits, then the remaining elements will be retained.
+    /// Use [`retain`] with a negated predicate if you do not need the returned iterator.
+    ///
+    /// [`retain`]: Self::retain
+    #[doc(alias = "drain_filter")]
+    pub fn extract_if(
+        &mut self,
+        should_remove: impl FnMut(&mut T) -> bool,
+    ) -> impl Iterator<Item = T> {
+        retain::ExtractIf { retain: retain::Retain::new(self), should_remove }
     }
 
     /// Resizes the vector so that its length is equal to `len`.
