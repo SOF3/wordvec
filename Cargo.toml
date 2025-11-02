@@ -6,6 +6,7 @@ authors = ["SOFe <sofe2038@gmail.com>"]
 license = "MIT"
 description = "A compact `SmallVec<T>`-like container with only `align_of::<T>()` overhead for small stack-only instances."
 categories = ["data-structures", "no-std"]
+repository = "https://github.com/SOF3/wordvec"
 
 [features]
 default = []
