@@ -1,7 +1,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
-use core::mem;
+use core::{mem, ops};
 use core::panic::AssertUnwindSafe;
 
 use crate::WordVec;
@@ -585,7 +585,7 @@ fn test_extract_if<const N: usize>(
         &mut predicate,
         expect_retain_drops,
         expect_after_retain,
-        |wv, predicate| wv.extract_if(|d| !predicate(d)).for_each(drop),
+        |wv, predicate| wv.extract_if(.., |d| !predicate(d)).for_each(drop),
     );
 }
 
@@ -670,31 +670,43 @@ fn test_extract_if_ftf() {
 
 fn test_extract_if_drop(
     retain_first: bool,
-    expect_extract_result: &str,
+    range: ops::Range<usize>,
+    expect_extract_result: Option<&str>,
     expect_retain_drops: usize,
     expect_after_retain: &[&str],
 ) {
     let counter = &Cell::new(0);
     let mut wv =
-        (0..3).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 4>>();
+        (0..5).map(|i| AssertDrop { string: i.to_string(), counter }).collect::<WordVec<_, 8>>();
 
     {
         let mut retain = retain_first;
-        let mut iter = wv.extract_if(|_| !mem::replace(&mut retain, false));
-        assert_eq!(iter.next().unwrap().string, expect_extract_result);
+        let mut iter = wv.extract_if(range, |_| !mem::replace(&mut retain, false));
+
+        let extract_result = iter.next();
+        assert_eq!(extract_result.as_ref().map(|d| d.string.as_str()), expect_extract_result);
     }
 
     assert_eq!(counter.get(), expect_retain_drops);
     assert_eq!(wv.iter().map(|d| d.string.as_str()).collect::<Vec<_>>(), expect_after_retain);
     drop(wv);
-    assert_eq!(counter.get(), 3);
+    assert_eq!(counter.get(), 5);
 }
 
 #[test]
-fn test_extract_if_shifted_drop() { test_extract_if_drop(true, "1", 1, &["0", "2"]); }
+fn test_extract_if_shifted_drop_full() { test_extract_if_drop(true, 0..5, Some("1"), 1, &["0", "2", "3", "4"]); }
 
 #[test]
-fn test_extract_if_unshifted_drop() { test_extract_if_drop(false, "0", 1, &["1", "2"]); }
+fn test_extract_if_unshifted_drop_full() { test_extract_if_drop(false, 0..5, Some("0"), 1, &["1", "2", "3", "4"]); }
+
+#[test]
+fn test_extract_if_shifted_drop_ranged() { test_extract_if_drop(true, 1..3, Some("2"), 1, &["0", "1", "3", "4"]); }
+
+#[test]
+fn test_extract_if_unshifted_drop_ranged() { test_extract_if_drop(false, 1..3, Some("1"), 1, &["0", "2", "3", "4"]); }
+
+#[test]
+fn test_extract_if_empty_range() { test_extract_if_drop(false, 3..2, None, 0, &["0", "1", "2", "3", "4"]); }
 
 fn assert_resize<const N: usize>(
     initial_len: usize,

@@ -1,20 +1,30 @@
-use core::mem::{self, MaybeUninit};
+use core::{hint::assert_unchecked, iter::FusedIterator, mem::{self, MaybeUninit}, ops::RangeBounds};
+
+use crate::resolve_range;
 
 pub(super) struct Retain<'a, T> {
     set_len:     super::LengthSetter<'a>,
+    /// The slice of all initially initialized data.
     init_slice:  &'a mut [MaybeUninit<T>],
+    /// Index of the next item to determine for extraction.
     read_len:    usize,
+    /// Index of the next slot to write into.
+    /// Must be less than or equal to `read_len`.
     written_len: usize,
+    /// When `read_len >= stop_len`, the data are unconditionally retained.
+    /// `stop_len` is guaranteed to be less than or equal to `init_slice.len()`.
+    stop_len: usize,
 }
 
 impl<'a, T> Retain<'a, T> {
-    pub(super) fn new<const N: usize>(vec: &'a mut super::WordVec<T, N>) -> Self {
+    pub(super) fn new<const N: usize>(vec: &'a mut super::WordVec<T, N>, range: impl RangeBounds<usize>) -> Self {
         let (capacity_slice, old_len, mut set_len) = vec.as_uninit_slice_with_length_setter();
+        let (start, end) = resolve_range(range, old_len);
 
         // SAFETY: length 0 is always safe
-        unsafe { set_len.set_len(0) };
+        unsafe { set_len.set_len(start) };
 
-        Self { set_len, init_slice: &mut capacity_slice[..old_len], read_len: 0, written_len: 0 }
+        Self { set_len, init_slice: &mut capacity_slice[..old_len], read_len: start, written_len: start, stop_len: end }
     }
 }
 
@@ -37,6 +47,14 @@ impl<T> Drop for Retain<'_, T> {
 
 impl<T> Retain<'_, T> {
     pub(super) fn next(&mut self, should_retain: impl FnOnce(&mut T) -> bool) -> NextResult<T> {
+        // SAFETY: guaranteed by data structure contract.
+        unsafe { assert_unchecked(self.stop_len <= self.init_slice.len()) };
+
+        if self.read_len >= self.stop_len {
+            // The remaining items will be shifted forward when self is dropped.
+            return NextResult::Exhausted;
+        }
+
         let Some(item_uninit) = self.init_slice.get_mut(self.read_len) else {
             return NextResult::Exhausted;
         };
@@ -114,3 +132,8 @@ where
         }
     }
 }
+
+impl<T, F> FusedIterator for ExtractIf<'_, T, F>
+where
+    F: FnMut(&mut T) -> bool,
+{}
