@@ -713,16 +713,7 @@ impl<T, const N: usize> WordVec<T, N> {
         let (capacity_slice, current_len, mut set_len) = self.as_uninit_slice_with_length_setter();
         let initial_slice = &mut capacity_slice[..current_len];
 
-        let start_drain = match range.start_bound() {
-            Bound::Included(&n) => n,
-            Bound::Excluded(&n) => n.checked_add(1).expect("start index overflow"),
-            Bound::Unbounded => 0,
-        };
-        let end_drain = match range.end_bound() {
-            Bound::Included(&n) => n.checked_add(1).expect("end index overflow"),
-            Bound::Excluded(&n) => n,
-            Bound::Unbounded => current_len,
-        };
+        let (start_drain, end_drain) = resolve_range(range, current_len);
 
         assert!(start_drain <= end_drain, "start drain index must not exceed end drain index");
         assert!(end_drain <= current_len, "end drain index must not exceed current vector length");
@@ -755,7 +746,7 @@ impl<T, const N: usize> WordVec<T, N> {
     where
         F: FnMut(&mut T) -> bool,
     {
-        let mut retain = retain::Retain::new(self);
+        let mut retain = retain::Retain::new(self, ..);
         loop {
             if let retain::NextResult::Exhausted = retain.next(&mut should_retain) {
                 break;
@@ -777,9 +768,10 @@ impl<T, const N: usize> WordVec<T, N> {
     #[doc(alias = "drain_filter")]
     pub fn extract_if(
         &mut self,
+        range: impl RangeBounds<usize>,
         should_remove: impl FnMut(&mut T) -> bool,
     ) -> impl Iterator<Item = T> {
-        retain::ExtractIf { retain: retain::Retain::new(self), should_remove }
+        retain::ExtractIf { retain: retain::Retain::new(self, range), should_remove }
     }
 
     /// Resizes the vector so that its length is equal to `len`.
@@ -861,6 +853,25 @@ fn unwind_safe_write_slice<T>(
     }
 
     mem::forget(guard);
+}
+
+/// Resolves a range into actual start and end offsets for a slice of length `current_len`.
+///
+/// Returns `(start, end)`. It is guaranteed that `0 <= start <= end <= current_len`.
+///
+/// This function doe snot panic.
+fn resolve_range(range: impl RangeBounds<usize>, current_len: usize) -> (usize, usize) {
+    let end = match range.end_bound() {
+        Bound::Included(&n) => n.checked_add(1).unwrap_or(current_len),
+        Bound::Excluded(&n) => n,
+        Bound::Unbounded => current_len,
+    }.min(current_len);
+    let start = match range.start_bound() {
+        Bound::Included(&n) => n,
+        Bound::Excluded(&n) => n.checked_add(1).unwrap_or(end),
+        Bound::Unbounded => 0,
+    }.min(end);
+    (start, end)
 }
 
 /// A destructured component of `WordVec` to support setting length.
