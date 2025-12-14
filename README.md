@@ -1,14 +1,54 @@
 # wordvec
 
-[![GitHub CI](https://github.com/SOF3/wordvec/workflows/CI/badge.svg)](https://github.com/SOF3/wordvec/actions?query=workflow%3ACI)
+[![GitHub CI](https://github.com/SOF3/wordvec/actions/workflows/ci.yml/badge.svg?event=push)](https://github.com/SOF3/wordvec/actions?query=workflow%3ACI)
 [![crates.io](https://img.shields.io/crates/v/wordvec.svg)](https://crates.io/crates/wordvec)
 [![crates.io](https://img.shields.io/crates/d/wordvec.svg)](https://crates.io/crates/wordvec)
 [![docs.rs](https://docs.rs/wordvec/badge.svg)](https://docs.rs/wordvec)
 [![GitHub](https://img.shields.io/github/last-commit/SOF3/wordvec)](https://github.com/SOF3/wordvec)
 [![GitHub](https://img.shields.io/github/stars/SOF3/wordvec?style=social)](https://github.com/SOF3/wordvec)
 
-A [thin][thinvec] and [small][smallvec] vector
-that can fit data into a single `usize`.
+A [thin][thinvec] and [small][smallvec] vector with memory footprint as small as a `usize`.
+
+Specialized for large number of colocated small vectors,
+such as `Vec<WordVec<T, N>>` or [ECS][ecs] components.
+
+> This project has nothing to do with NLP embedding vectors.
+
+## When to use
+
+Use WordVec when all of the following meet your scenario:
+
+### `N` is small
+
+WordVec has no advantage over [SmallVec][smallvec] if it cannot pack into a smaller struct.
+It is not meaningful to set `N` such that `align_of::<T>() + N * size_of::<T>()` exceeds 24.
+
+### Length rarely exceeds `N`
+
+When the length exceeds `N`, WordVec falls back to a thin heap allocation,
+which is significantly (several times) slower than conventional vectors
+because reading the length and capacity often results in CPU cache misses.
+
+WordVec is ideally used when the expected behavior is
+"length should never exceed `N`, but behavior is still correct when it exceeds".
+
+### Many colocated vectors
+
+Since the length encoding in the inlined layout is indirect (involves a bitshift),
+raw inlined access also tends to be slower in WordVec compared to SmallVec,
+as a tradeoff of reduced memory footprint of each vector alone.
+However, it reduces the number of CPU cache misses due to tighter packing between inlined data,
+which leads to better overall performance when many vectors are colocated.
+
+This may get handy in scenarios with a large array of small vectors, e.g. [ECS][ecs],
+where WordVec as a component would be packed in an archetype component storage contiguously.
+
+### Iteration is more frequent than resizing
+
+Resizing a WordVec involves bitshifting,
+which may be more expensive than SmallVec/std::vec.
+This tradeoff is only justified when
+iteration is significantly more frequent than resizing.
 
 ## Memory layout
 
@@ -48,32 +88,6 @@ the thin pointer is always a multiple of `align_of::<usize>()`.
 Thus, the least significant bit of the thin pointer is always 0,
 which distinguishes it from the inlined layout.
 
-## When to use
-
-WordVec is a niche data structure that works best when all of the following conditions are met:
-
-### Less than 24 bytes
-Although the technical limit is `N <= 127`,
-it is not meaningful to set `N` such that `align_of::<T>() + N * size_of::<T>()` exceeds 24;
-WordVec has no advantage over [SmallVec][smallvec] if it cannot pack into a smaller struct.
-
-### Inlined layout is hot path
-Thin vectors are significantly (several times) slower than conventional vectors
-since reading the length and capacity usually involves accessing memory out of active cache.
-Thus, heap layout is supposed to be the cold path.
-In other words, WordVec is basically
-"length should never exceed `N`, but behavior is still correct when it exceeds".
-
-### Many colocated vectors
-Since the length encoding in the inlined layout is indirect (involves a bitshift),
-raw inlined access also tends to be slower in WordVec compared to SmallVec,
-as a tradeoff of reduced memory footprint of each vector alone.
-However, it reduces the number of L1 cache misses due to tighter packing between inlined data,
-which leads to better overall performance when many vectors are colocated.
-
-This may get handy in scenarios with a large array of small vectors, e.g. [ECS][ecs],
-where WordVec as a component would be packed in an archetype component storage contiguously.
-
 ## Platform requirements
 
 Targets violating the following requirements will lead to compile error:
@@ -88,23 +102,17 @@ can be found on [GitHub pages][bench-criterion].
 Note that GitHub CI runners are subject to many uncontrolled noise sources
 and may not be very reliable.
 You may reproduce the benchmarks yourself by running `cargo bench --bench criterion`,
-or check the [valgrind-based analysis][bench-iai] instead.
+or check the [cachegrind analysis][bench-iai] instead.
 
 The benchmarks compare `std::vec`, [`thinvec`][thinvec], [`smallvec`][smallvec] and `wordvec`.
 The general observation is that WordVec performance is mostly comparable to SmallVec, but:
-- is consistently slower with operations on a *single* small vector (presumably due to bitshifting the length byte),
+
+- WordVec is consistently slower with operations on a *single* small vector (presumably due to bitshifting the length byte),
   particularly resizing operations such as `push`.
-- is sometimes slower with operations on large vectors due to thinness (reading/writing length/capacity from heap)
-- is consistently faster with operations on *many* small vectors due to more efficient memory (fewer RAM accesses),
+- WordVec may be slower with operations on large vectors due to reading/writing length/capacity from heap.
+- WordVec is consistently faster with iteration operations on *many* small vectors
+  due to more efficient memory (fewer RAM accesses),
   particularly with operations updating the inner values of a `Vec<WordVec<T, N>>`.
-
-## Vec feature parity
-
-WordVec is a new project to experiment on new semantics.
-Currently only the basic features required to produce meaningful benchmarks are implemented,
-but **all features from `std::vec` shall be implemented** in this library eventually.
-Pull requests are welcome to align WordVec functionality with `std::vec` or smallvec;
-I do not have bandwidth to implement all those functions but I am happy to review such contributions.
 
 [smallvec]: https://docs.rs/smallvec
 [thinvec]: https://docs.rs/thin-vec
