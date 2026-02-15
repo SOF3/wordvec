@@ -262,6 +262,7 @@ impl<T> Allocated<T> {
     pub(crate) unsafe fn data_start(this: NonNull<Self>) -> *mut T {
         let base = this.as_ptr().cast::<u8>();
         // SAFETY: base points to a valid allocation whose data starts immediately after the header.
+        // `new_layout` uses the same header size (see the debug assertion there).
         unsafe { base.add(size_of::<Self>()).cast::<T>() }
     }
 }

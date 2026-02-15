@@ -34,6 +34,7 @@ fn test_large_layout_padding_and_data_start() {
         assert_eq!(offset, size_of::<Allocated<T>>());
 
         let layout = large.current_layout();
+        assert_eq!(layout, Large::<T>::new_layout(1));
         let ptr = large.0;
         unsafe {
             dealloc(ptr.as_ptr().cast(), layout);
