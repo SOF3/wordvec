@@ -19,20 +19,31 @@ fn assert_size() {
 fn test_large_layout_padding_and_data_start() {
     use crate::internal::{Allocated, Large};
 
-    let layout = Large::<u8>::new_layout(1);
-    assert_eq!(layout.size() % layout.align(), 0);
+    #[allow(dead_code)]
+    #[repr(align(32))]
+    struct Align32(u8);
 
-    let large = Large::<u8>::new_empty(1);
-    let (allocated, data_start) = large.as_allocated();
-    let base = allocated as *const Allocated<u8> as *const u8;
-    let offset = unsafe { data_start.offset_from(base) as usize };
-    assert_eq!(offset, size_of::<Allocated<u8>>());
+    fn assert_layout<T>() {
+        let layout = Large::<T>::new_layout(1);
+        assert_eq!(layout.size() % layout.align(), 0);
 
-    let layout = large.current_layout();
-    let ptr = large.0;
-    unsafe {
-        dealloc(ptr.as_ptr().cast(), layout);
+        let large = Large::<T>::new_empty(1);
+        let (allocated, data_start) = large.as_allocated();
+        let base = allocated as *const Allocated<T> as *const u8;
+        let offset = unsafe { data_start.cast::<u8>().offset_from(base) as usize };
+        assert_eq!(offset, size_of::<Allocated<T>>());
+
+        let layout = large.current_layout();
+        let ptr = large.0;
+        unsafe {
+            dealloc(ptr.as_ptr().cast(), layout);
+        }
     }
+
+    assert_layout::<u8>();
+    assert_layout::<u64>();
+    assert_layout::<u128>();
+    assert_layout::<Align32>();
 }
 
 struct AssertDrop<'a> {
