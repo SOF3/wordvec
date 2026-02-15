@@ -77,7 +77,8 @@ impl<T> Large<T> {
         let header = Layout::new::<Allocated<T>>();
         let data = Layout::array::<T>(cap).expect("new capacity is too large");
         let (layout, offset) = header.extend(data).expect("new capacity is too large");
-        // `Allocated<T>` already aligns the trailing data via its zero-length `data_start` field.
+        // `Layout::new::<Allocated<T>>()` already includes padding for `T`,
+        // so the trailing data starts immediately after the header.
         debug_assert_eq!(offset, size_of::<Allocated<T>>());
         layout.pad_to_align()
     }
