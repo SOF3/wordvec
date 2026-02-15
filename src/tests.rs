@@ -1,5 +1,6 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::alloc::dealloc;
 use core::cell::Cell;
 use core::panic::AssertUnwindSafe;
 use core::{mem, ops};
@@ -12,6 +13,26 @@ fn assert_size() {
     assert_eq!(size_of::<WordVec<i32, 1>>(), 8);
     assert_eq!(size_of::<WordVec<i16, 3>>(), 8);
     assert_eq!(size_of::<WordVec<i8, 7>>(), 8);
+}
+
+#[test]
+fn test_large_layout_padding_and_data_start() {
+    use crate::internal::{Allocated, Large};
+
+    let layout = Large::<u8>::new_layout(1);
+    assert_eq!(layout.size() % layout.align(), 0);
+
+    let large = Large::<u8>::new_empty(1);
+    let (allocated, data_start) = large.as_allocated();
+    let base = allocated as *const Allocated<u8> as *const u8;
+    let offset = unsafe { data_start.offset_from(base) as usize };
+    assert_eq!(offset, size_of::<Allocated<u8>>());
+
+    let layout = large.current_layout();
+    let ptr = large.0;
+    unsafe {
+        dealloc(ptr.as_ptr().cast(), layout);
+    }
 }
 
 struct AssertDrop<'a> {

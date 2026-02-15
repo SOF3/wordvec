@@ -74,14 +74,11 @@ pub(crate) struct Large<T>(pub(crate) NonNull<Allocated<T>>);
 
 impl<T> Large<T> {
     pub(crate) fn new_layout(cap: usize) -> Layout {
-        let additional_size = size_of::<T>().checked_mul(cap).expect("new capacity is too large");
-        let size = size_of::<Allocated<T>>()
-            .checked_add(additional_size)
-            .expect("new capacity is too large");
-        let align = align_of::<Allocated<T>>();
-        // SAFETY: size of Allocated<T> must be a multiple of align of Allocated<T>,
-        // which must be a multiple of align of T due to the `data` field.
-        unsafe { Layout::from_size_align_unchecked(size, align) }
+        let header = Layout::new::<Allocated<T>>();
+        let data = Layout::array::<T>(cap).expect("new capacity is too large");
+        let (layout, offset) = header.extend(data).expect("new capacity is too large");
+        debug_assert_eq!(offset, size_of::<Allocated<T>>());
+        layout.pad_to_align()
     }
 
     pub(crate) fn as_allocated(&self) -> (&Allocated<T>, *const T) {
@@ -262,6 +259,8 @@ impl<T> Allocated<T> {
     ///
     /// The data behind the header are allowed to be uninitialized.
     pub(crate) unsafe fn data_start(this: NonNull<Self>) -> *mut T {
-        unsafe { (&raw mut (*this.as_ptr()).data_start).cast() }
+        let base = this.as_ptr().cast::<u8>();
+        // SAFETY: base points to a valid allocation whose data starts immediately after the header.
+        unsafe { base.add(size_of::<Self>()).cast::<T>() }
     }
 }
