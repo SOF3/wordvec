@@ -1,5 +1,6 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::alloc::dealloc;
 use core::cell::Cell;
 use core::panic::AssertUnwindSafe;
 use core::{mem, ops};
@@ -12,6 +13,49 @@ fn assert_size() {
     assert_eq!(size_of::<WordVec<i32, 1>>(), 8);
     assert_eq!(size_of::<WordVec<i16, 3>>(), 8);
     assert_eq!(size_of::<WordVec<i8, 7>>(), 8);
+}
+
+#[test]
+fn test_large_layout_padding_and_data_start() {
+    use crate::internal::{Allocated, Large};
+
+    #[allow(dead_code)]
+    #[repr(align(32))]
+    struct Align32(u8);
+
+    fn assert_layout<T>() {
+        use core::alloc::Layout;
+        use core::ptr::NonNull;
+
+        let layout = Large::<T>::new_layout(1);
+        assert_eq!(layout.size() % layout.align(), 0);
+
+        let large = Large::<T>::new_empty(1);
+        let layout = large.current_layout();
+        assert_eq!(layout, Large::<T>::new_layout(1));
+        struct DeallocGuard<T> {
+            ptr: NonNull<Allocated<T>>,
+            layout: Layout,
+        }
+        impl<T> Drop for DeallocGuard<T> {
+            fn drop(&mut self) {
+                unsafe {
+                    dealloc(self.ptr.as_ptr().cast(), self.layout);
+                }
+            }
+        }
+        let _guard = DeallocGuard { ptr: large.0, layout };
+
+        let (allocated, data_start) = large.as_allocated();
+        let base = allocated as *const Allocated<T> as *const u8;
+        let offset = unsafe { data_start.cast::<u8>().offset_from(base) as usize };
+        assert_eq!(offset, size_of::<Allocated<T>>());
+    }
+
+    assert_layout::<u8>();
+    assert_layout::<u64>();
+    assert_layout::<u128>();
+    assert_layout::<Align32>();
 }
 
 struct AssertDrop<'a> {
