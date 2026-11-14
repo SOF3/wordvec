@@ -1,5 +1,5 @@
-use alloc::alloc::{alloc, handle_alloc_error, realloc};
-use core::alloc::Layout;
+use alloc::alloc::handle_alloc_error;
+use core::alloc::{Allocator, Layout};
 use core::hint::assert_unchecked;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::{self, NonNull};
@@ -104,7 +104,11 @@ impl<T> Large<T> {
     /// This function never reads or writes `Allocated.len`.
     /// This allows the local cache of `len` in `extend_large_iter`
     /// to remain valid when reallocation occurs during growth.
-    pub(crate) fn grow(&mut self, min_new_cap: usize) -> usize {
+    pub(crate) fn try_grow(
+        &mut self,
+        min_new_cap: usize,
+        alloc: &impl Allocator,
+    ) -> Result<usize, Error> {
         let mut new_cap = min_new_cap;
 
         let old_cap = self.as_allocated().0.cap;
@@ -112,31 +116,40 @@ impl<T> Large<T> {
             new_cap = new_cap.max(double);
         }
 
-        self.grow_exact(new_cap);
-        new_cap
+        self.try_grow_exact(new_cap, alloc)?;
+        Ok(new_cap)
     }
 
-    pub(crate) fn grow_exact(&mut self, new_cap: usize) {
+    pub(crate) fn try_grow_exact(
+        &mut self,
+        new_cap: usize,
+        alloc: &impl Allocator,
+    ) -> Result<(), Error> {
         let old_layout = self.current_layout();
         let new_layout = Self::new_layout(new_cap);
-        // SAFETY: new_layout never returns a zero layout.
-        let new_ptr = unsafe { realloc(self.0.as_ptr().cast(), old_layout, new_layout.size()) };
-        let Some(new_ptr) = NonNull::new(new_ptr) else { handle_alloc_error(new_layout) };
+        // SAFETY: we never work with mixed allocators at a time.
+        let new_ptr = unsafe { alloc.grow(self.0.cast(), old_layout, new_layout) }
+            .map_err(Error::mapper(new_layout))?;
         self.0 = new_ptr.cast();
         // SAFETY: the previous `cap` value was initialized to a valid value.
         unsafe {
             (*self.0.as_ptr()).cap = new_cap;
         }
+        Ok(())
     }
 
-    pub(crate) fn extend_iter(&mut self, values: impl Iterator<Item = T>) {
+    pub(crate) fn try_extend_iter(
+        &mut self,
+        values: impl Iterator<Item = T>,
+        alloc: &impl Allocator,
+    ) -> Result<(), Error> {
         let (&Allocated { len, mut cap, .. }, _) = self.as_allocated();
 
         let (hint_min, _) = values.size_hint();
         let hint_len = len.checked_add(hint_min).expect("new length out of bounds");
 
         if hint_len > cap {
-            cap = self.grow(hint_len);
+            cap = self.try_grow(hint_len, alloc)?;
         }
 
         let mut new_len = len;
@@ -160,7 +173,7 @@ impl<T> Large<T> {
         for item in values {
             new_len = new_len.checked_add(1).expect("new length is out of bounds");
             if new_len > cap {
-                cap = self.grow(new_len);
+                cap = self.try_grow(new_len, alloc)?;
             }
 
             unsafe {
@@ -176,6 +189,8 @@ impl<T> Large<T> {
             let mut allocated_ptr = self.0;
             allocated_ptr.as_mut().len = new_len;
         }
+
+        Ok(())
     }
 
     /// Create a new `Large` with a new allocation,
@@ -184,24 +199,26 @@ impl<T> Large<T> {
     /// # Safety
     /// - `src` has the same invariants as [`ptr::drop_in_place`].
     /// - The data behind `src` is invalid after this function returns.
-    pub(crate) unsafe fn new(cap: usize, src: *mut [T]) -> Self {
-        let this = Self::new_empty(cap);
+    pub(crate) unsafe fn try_new(
+        cap: usize,
+        src: *mut [T],
+        alloc: &impl Allocator,
+    ) -> Result<Self, Error> {
+        let this = Self::try_new_empty(cap, alloc)?;
 
         // SAFETY: The underlying `Allocated` is now initialized with the correct capacity.
         unsafe {
             Allocated::extend(this.0, src);
         }
 
-        this
+        Ok(this)
     }
 
     /// Create a new `Large` with a new allocation and zero length.
-    pub(crate) fn new_empty(cap: usize) -> Self {
+    pub(crate) fn try_new_empty(cap: usize, alloc: &impl Allocator) -> Result<Self, Error> {
         let layout = Self::new_layout(cap);
 
-        // SAFETY: new_layout never returns a zero layout.
-        let ptr = unsafe { alloc(layout) };
-        let Some(ptr) = NonNull::new(ptr) else { handle_alloc_error(layout) };
+        let ptr = alloc.allocate(layout).map_err(Error::mapper(layout))?;
         let ptr = ptr.cast::<Allocated<T>>();
 
         // SAFETY: `ptr` can be derefed as an `Allocated<T>` since it was just allocated as such.
@@ -209,7 +226,7 @@ impl<T> Large<T> {
             ptr.write(Allocated::<T> { cap, len: 0, data_start: [] });
         }
 
-        Self(ptr)
+        Ok(Self(ptr))
     }
 }
 
@@ -230,10 +247,10 @@ impl<T> Allocated<T> {
     /// # Safety
     /// - `src` has the same invariants as [`ptr::drop_in_place`].
     /// - `(*this)` must be deref-able to a valid `&mut Self`.
-    /// - `(*this).len + src.len() <= self.cap`
+    /// - `(*this).len + src.len() <= (*this).cap`
     /// - `src` is invalid after this function returns.
     /// - `src` must not be derived from `this`.
-    pub(crate) unsafe fn extend(mut this: NonNull<Self>, src: *mut [T]) {
+    pub(crate) unsafe fn extend(mut this: NonNull<Self>, src: *const [T]) {
         let len = unsafe {
             let this_mut = this.as_mut();
             let old_len = this_mut.len;
@@ -246,7 +263,17 @@ impl<T> Allocated<T> {
     }
 
     /// Like `extend`, but reads the length from a parameter and does not write the new length.
-    pub(crate) unsafe fn extend_data(this: NonNull<Self>, src: *mut [T], old_len: usize) {
+    ///
+    /// # Safety
+    /// - `src` has the same invariants as [`ptr::drop_in_place`].
+    /// - `(*this)` must be deref-able to a valid `&mut Self`.
+    /// - `old_len + src.len() <= (*this).cap`
+    /// - `src` is invalid after this function returns.
+    /// - `src` must not be derived from `this`.
+    /// - `old_len` must be `(*this).len`.
+    //
+    // This function implementation MUST NOT panic since the length is already written.
+    pub(crate) unsafe fn extend_data(this: NonNull<Self>, src: *const [T], old_len: usize) {
         // SAFETY: length of self.data == self.cap >= new self.len >= old_len
         let dest_start = unsafe { Self::data_start(this).add(old_len) };
 
@@ -258,10 +285,41 @@ impl<T> Allocated<T> {
     }
 
     /// # Safety
+    /// - `this` must be deref-able to a valid `&mut Self`.
+    /// - `(*this).len < (*this).cap`
+    pub(crate) unsafe fn extend_one(mut this: NonNull<Self>, src: T) {
+        let old_len = {
+            let this_mut = unsafe { this.as_mut() };
+            let old_len = this_mut.len;
+            this_mut.len += 1;
+            old_len
+        };
+
+        unsafe {
+            // SAFETY: function safety invariant.
+            let data_start = Self::data_start(this).add(old_len);
+            data_start.write(src);
+        }
+    }
+
+    /// # Safety
     /// `this` must point to a valid header.
     ///
     /// The data behind the header are allowed to be uninitialized.
     pub(crate) unsafe fn data_start(this: NonNull<Self>) -> *mut T {
         unsafe { (&raw mut (*this.as_ptr()).data_start).cast() }
     }
+}
+
+pub(crate) struct Error {
+    pub(crate) error: alloc::alloc::AllocError,
+    layout:           Layout,
+}
+
+impl Error {
+    pub(crate) fn mapper(layout: Layout) -> impl Fn(alloc::alloc::AllocError) -> Self {
+        move |error| Self { error, layout }
+    }
+
+    pub(crate) fn diverge(self) -> ! { handle_alloc_error(self.layout) }
 }

@@ -5,37 +5,37 @@
 //!
 //! ## When to use
 //!
-//! Use WordVec when all of the following meet your scenario:
+//! Use `WordVec` when all of the following meet your scenario:
 //!
 //! ### `N` is small
 //!
-//! WordVec has no advantage over [SmallVec][smallvec] if it cannot pack into a smaller struct.
+//! `WordVec` has no advantage over [SmallVec][smallvec] if it cannot pack into a smaller struct.
 //! It is not meaningful to set `N` such that `align_of::<T>() + N * size_of::<T>()` exceeds 24.
 //!
 //! ### Length rarely exceeds `N`
 //!
-//! When the length exceeds `N`, WordVec falls back to a thin heap allocation,
+//! When the length exceeds `N`, `WordVec` falls back to a thin heap allocation,
 //! which is significantly (several times) slower than conventional vectors
 //! because reading the length and capacity often results in CPU cache misses.
 //!
-//! WordVec is ideally used when the expected behavior is
+//! `WordVec` is ideally used when the expected behavior is
 //! "length should never exceed `N`, but behavior is still correct when it exceeds".
 //!
 //! ### Many colocated vectors
 //!
 //! Since the length encoding in the inlined layout is indirect (involves a bitshift),
-//! raw inlined access also tends to be slower in WordVec compared to SmallVec,
+//! raw inlined access also tends to be slower in `WordVec` compared to `SmallVec`,
 //! as a tradeoff of reduced memory footprint of each vector alone.
 //! However, it reduces the number of CPU cache misses due to tighter packing between inlined data,
 //! which leads to better overall performance when many vectors are colocated.
 //!
 //! This may get handy in scenarios with a large array of small vectors, e.g. [ECS][ecs],
-//! where WordVec as a component would be packed in an archetype component storage contiguously.
+//! where `WordVec` as a component would be packed in an archetype component storage contiguously.
 //!
 //! ### Iteration is more frequent than resizing
 //!
-//! Resizing a WordVec involves bitshifting,
-//! which may be more expensive than SmallVec/std::vec.
+//! Resizing a `WordVec` involves bitshifting,
+//! which may be more expensive than `SmallVec`/`std::vec`.
 //! This tradeoff is only justified when
 //! iteration is significantly more frequent than resizing.
 //!
@@ -48,7 +48,7 @@
 //!
 //! ### Inlined layout
 //!
-//! WordVec can store up to `N` (generic const) items on the stack, where `N <= 127`:
+//! `WordVec` can store up to `N` (generic const) items on the stack, where `N <= 127`:
 //!
 //! ```text
 //! ┌──────────┬────────────────────────┐
@@ -64,7 +64,7 @@
 //!
 //! ### Heap layout
 //!
-//! In the heap layout, WordVec is effectively a thin **pointer to** the following structure on the heap:
+//! In the heap layout, `WordVec` is effectively a thin **pointer to** the following structure on the heap:
 //!
 //! ```text
 //! ┌────────┬──────────┬────────────────────────┐
@@ -94,12 +94,12 @@
 //! or check the [valgrind-based analysis][bench-iai] instead.
 //!
 //! The benchmarks compare `std::vec`, [`thinvec`][thinvec], [`smallvec`][smallvec] and `wordvec`.
-//! The general observation is that WordVec performance is mostly comparable to SmallVec, but:
+//! The general observation is that `WordVec` performance is mostly comparable to `SmallVec`, but:
 //!
-//! - WordVec is consistently slower with operations on a *single* small vector (presumably due to bitshifting the length byte),
+//! - `WordVec` is consistently slower with operations on a *single* small vector (presumably due to bitshifting the length byte),
 //!   particularly resizing operations such as `push`.
-//! - WordVec may be slower with operations on large vectors due to reading/writing length/capacity from heap.
-//! - WordVec is consistently faster with iteration operations on *many* small vectors
+//! - `WordVec` may be slower with operations on large vectors due to reading/writing length/capacity from heap.
+//! - `WordVec` is consistently faster with iteration operations on *many* small vectors
 //!   due to more efficient memory (fewer RAM accesses),
 //!   particularly with operations updating the inner values of a `Vec<WordVec<T, N>>`.
 //!
@@ -113,15 +113,19 @@
 #![no_std]
 #![warn(clippy::pedantic)]
 #![deny(missing_docs)]
+#![allow(
+    clippy::missing_errors_doc,
+    reason = "some errors are implicitly documented in the main comment"
+)]
 
 extern crate alloc;
 
-use alloc::alloc::{dealloc, handle_alloc_error, realloc};
+use alloc::alloc::Global;
+use core::alloc::{AllocError, Allocator};
 use core::hint::assert_unchecked;
 use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Bound, RangeBounds};
-use core::ptr::{self, NonNull};
-use core::{cmp, iter, slice};
+use core::{cmp, iter, ptr, slice};
 
 #[cfg(test)]
 mod tests;
@@ -155,7 +159,10 @@ mod serde_tests;
 /// It is advised that `size_of::<T>() * N + align_of::<T>()` does not exceed 20 bytes.
 ///
 /// See the [readme](https://github.com/SOF3/wordvec) for more information.
-pub struct WordVec<T, const N: usize>(Inner<T, N>);
+pub struct WordVec<T, const N: usize, A: Allocator = Global> {
+    inner: Inner<T, N>,
+    alloc: A,
+}
 
 struct ReserveArgs {
     len: usize,
@@ -166,14 +173,10 @@ struct ShrinkToArgs {
     len: usize,
 }
 
-impl<T, const N: usize> WordVec<T, N> {
+impl<T, const N: usize> WordVec<T, N, Global> {
     /// Creates an empty vector.
     #[must_use]
-    pub const fn new() -> Self {
-        Inner::<T, N>::assert_generics();
-
-        Self(Inner { small: ManuallyDrop::new(Small::new_uninit(0)) })
-    }
+    pub const fn new() -> Self { Self::new_in(Global) }
 
     /// Creates a new **inlined** vector with specified data.
     ///
@@ -184,6 +187,37 @@ impl<T, const N: usize> WordVec<T, N> {
     /// A *compile* error occurs if `LENGTH > N`.
     #[must_use]
     pub const fn new_inlined<const LENGTH: usize>(values: [T; LENGTH]) -> Self {
+        Self::new_inlined_in(values, Global)
+    }
+
+    /// Creates an empty vector with the specified capacity.
+    ///
+    /// The resultant capacity is actually `max(N, cap)`.
+    ///
+    /// # Panics
+    /// Panics when `cap > N` and the global allocator cannot allocate `cap` items of type `T`.
+    #[must_use]
+    pub fn with_capacity(cap: usize) -> Self { Self::with_capacity_in(cap, Global) }
+}
+
+impl<T, const N: usize, A: Allocator> WordVec<T, N, A> {
+    /// Equivalent to [`Self::new`] with a custom allocator.
+    ///
+    /// This function does not actually allocate yet since the vector is empty
+    /// and necessarily uses the inlined layout.
+    #[must_use]
+    pub const fn new_in(alloc: A) -> Self {
+        Inner::<T, N>::assert_generics();
+
+        Self { inner: Inner { small: ManuallyDrop::new(Small::new_uninit(0)) }, alloc }
+    }
+
+    /// Equivalent to [`Self::new_inlined`] with a custom allocator.
+    ///
+    /// This function does not actually allocate yet since `LENGTH <= N`
+    /// and the result necessarily uses the inlined layout.
+    #[must_use]
+    pub const fn new_inlined_in<const LENGTH: usize>(values: [T; LENGTH], alloc: A) -> Self {
         const {
             Inner::<T, N>::assert_generics();
             assert!(LENGTH <= N, "new_inlined can only be used to create an inlined vector");
@@ -199,30 +233,40 @@ impl<T, const N: usize> WordVec<T, N> {
         }
         mem::forget(values); // do not drop values; they have already been moved
 
-        Self(Inner { small: ManuallyDrop::new(Small::new(LENGTH, data)) })
+        Self { inner: Inner { small: ManuallyDrop::new(Small::new(LENGTH, data)) }, alloc }
     }
 
-    /// Creates an empty vector with the specified capacity.
+    /// Equivalent to [`Self::with_capacity`] with a custom allocator.
     ///
-    /// The resultant capacity is actually `max(N, cap)`.
+    /// # Panics
+    /// Panics when `cap > N` and `alloc` cannot allocate `cap` items of type `T`.
     #[must_use]
-    pub fn with_capacity(cap: usize) -> Self {
+    pub fn with_capacity_in(cap: usize, alloc: A) -> Self {
+        Self::raw_with_capacity(cap, alloc).unwrap_or_else(|err| err.diverge())
+    }
+
+    /// Equivalent to [`Self::with_capacity_in`] but returns `Err` instead of panicking.
+    pub fn try_with_capacity_in(cap: usize, alloc: A) -> Result<Self, AllocError> {
+        Self::raw_with_capacity(cap, alloc).map_err(|err| err.error)
+    }
+
+    fn raw_with_capacity(cap: usize, alloc: A) -> Result<Self, internal::Error> {
         Inner::<T, N>::assert_generics();
 
         if cap <= N {
-            Self::default()
+            Ok(Self::new_in(alloc))
         } else {
-            let large = Large::new_empty(cap);
-            Self(Inner { large: ManuallyDrop::new(large) })
+            let large = Large::try_new_empty(cap, &alloc)?;
+            Ok(Self { inner: Inner { large: ManuallyDrop::new(large) }, alloc })
         }
     }
 
     /// Returns an immutable slice of all initialized data.
     pub fn as_slice(&self) -> &[T] {
-        match self.0.parse_marker() {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(len) => {
                 // SAFETY: variant indicated by marker
-                let small = unsafe { &self.0.small };
+                let small = unsafe { &self.inner.small };
                 // SAFETY: len must be less than or equal to N
                 let uninit_slice = unsafe { small.data.get_unchecked(..usize::from(len)) };
                 // SAFETY: marker indicates that all first `len` elements are initialized.
@@ -230,7 +274,7 @@ impl<T, const N: usize> WordVec<T, N> {
             }
             ParsedMarker::Large => {
                 // SAFETY: variant indicated by marker
-                let large = unsafe { &self.0.large };
+                let large = unsafe { &self.inner.large };
                 // SAFETY: Large.0 is always a valid reference.
                 let (allocated, data_start) = large.as_allocated();
                 // SAFETY: `allocated.data` is always a valid slice pointer of length `allocated.len`
@@ -241,10 +285,10 @@ impl<T, const N: usize> WordVec<T, N> {
 
     /// Returns a mutable slice of all initialized data.
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        match self.0.parse_marker() {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(len) => {
                 // SAFETY: variant indicated by marker
-                let small = unsafe { &mut self.0.small };
+                let small = unsafe { &mut self.inner.small };
                 // SAFETY: len must be less than or equal to N
                 let uninit_slice = unsafe { small.data.get_unchecked_mut(..usize::from(len)) };
                 // SAFETY: marker indicates that all first `len` elements are initialized.
@@ -252,7 +296,7 @@ impl<T, const N: usize> WordVec<T, N> {
             }
             ParsedMarker::Large => {
                 // SAFETY: variant indicated by marker
-                let large = unsafe { &mut self.0.large };
+                let large = unsafe { &mut self.inner.large };
                 // SAFETY: Large.0 is always a valid reference.
                 let (allocated, data_start) = large.as_allocated_mut();
                 // SAFETY: `allocated.data` is always a valid slice pointer of length `allocated.len`
@@ -279,10 +323,10 @@ impl<T, const N: usize> WordVec<T, N> {
     pub fn as_uninit_slice_with_length_setter(
         &mut self,
     ) -> (&mut [MaybeUninit<T>], usize, LengthSetter<'_>) {
-        match self.0.parse_marker() {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(len) => {
                 // SAFETY: variant indicated by marker
-                let small = unsafe { &mut *self.0.small };
+                let small = unsafe { &mut *self.inner.small };
 
                 // SAFETY: invariant for the data structure.
                 unsafe { assert_unchecked(len as usize <= N) };
@@ -301,7 +345,7 @@ impl<T, const N: usize> WordVec<T, N> {
             }
             ParsedMarker::Large => {
                 // SAFETY: variant indicated by marker
-                let large = unsafe { &mut self.0.large };
+                let large = unsafe { &mut self.inner.large };
                 // SAFETY: Large.0 is always a valid reference.
                 let (allocated, data_start) = large.as_allocated_mut();
                 // SAFETY: `allocated.data` is always a valid *uninit* slice pointer of length `allocated.cap`
@@ -329,11 +373,11 @@ impl<T, const N: usize> WordVec<T, N> {
 
     /// Returns the number of items in this vector.
     pub fn len(&self) -> usize {
-        match self.0.parse_marker() {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(len) => usize::from(len),
             ParsedMarker::Large => {
                 // SAFETY: variant indicated by marker
-                let large = unsafe { &self.0.large };
+                let large = unsafe { &self.inner.large };
                 large.as_allocated().0.len
             }
         }
@@ -353,46 +397,113 @@ impl<T, const N: usize> WordVec<T, N> {
     /// Nevertheless, the length may shrink without reducing capacity,
     /// so `len() <= N` does **not** imply `capacity() == N`.
     pub fn capacity(&self) -> usize {
-        match self.0.parse_marker() {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(_) => N,
             ParsedMarker::Large => {
                 // SAFETY: variant indicated by marker
-                let large = unsafe { &self.0.large };
+                let large = unsafe { &self.inner.large };
                 large.as_allocated().0.cap
             }
         }
     }
 
     /// Pushes an item to the end of this vector.
-    pub fn push(&mut self, value: T) {
-        match self.0.parse_marker() {
+    ///
+    /// # Panics
+    /// Panics if the allocator fails to reserve memory.
+    ///
+    /// Note that `push` may attempt to reserve more memory than necessary for this new item alone,
+    /// but would not resort to reserving less even in the case of a failed allocation.
+    /// That is, panic is still possible even if the allocator is able to
+    /// grow the allocation to exactly `len() + 1` items but not `capacity() * GROW_FACTOR` items.
+    pub fn push(&mut self, value: T) { self.raw_push(value).unwrap_or_else(|err| err.diverge()) }
+
+    /// Equivalent to [`Self::push`] but returns `Err` instead of panicking.
+    ///
+    /// Similar to `push`, failure may occur even if the allocator is able to grow the allocation
+    /// to exactly `len() + 1` items but not `capacity() * GROW_FACTOR` items.
+    pub fn try_push(&mut self, value: T) -> Result<(), AllocError> {
+        self.raw_push(value).map_err(|err| err.error)
+    }
+
+    fn raw_push(&mut self, value: T) -> Result<(), internal::Error> {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(len) if usize::from(len) < N => {
                 let mut values = ManuallyDrop::new([value]);
-                // SAFETY: marker is Small
-                unsafe { self.extend_small(&mut *values) }
-            }
-            ParsedMarker::Small(_) => {
                 unsafe {
-                    self.move_small_to_large(N + 1);
+                    // SAFETY: marker is Small
+                    self.extend_small(&mut *values);
                 }
-                let mut values = ManuallyDrop::new([value]);
-                // SAFETY: we have moved to large right above.
-                unsafe { self.extend_large_slice(&mut *values) }
+                Ok(())
             }
-            ParsedMarker::Large => {
-                let mut values = ManuallyDrop::new([value]);
-                // SAFETY: marker is Large
-                unsafe { self.extend_large_slice(&mut *values) }
+            ParsedMarker::Small(_) => unsafe {
+                self.move_small_to_large(N + 1)?;
+                self.extend_large_one(value)
+            },
+            ParsedMarker::Large => unsafe { self.extend_large_one(value) },
+        }
+    }
+
+    /// Pushes a copy of the slice to the end of this vector.
+    ///
+    /// Unlike `Vec::extend_from_slice`, this function requires `T: Copy` instead of `T: Copy`
+    /// due to lack of specialization.
+    ///
+    /// # Panics
+    /// Panics if the allocator fails to reserve memory.
+    ///
+    /// See [`Self::push`] for over-allocation caveats.
+    pub fn extend_from_slice(&mut self, slice: &[T])
+    where
+        T: Copy,
+    {
+        self.raw_extend_from_slice(slice).unwrap_or_else(|err| err.diverge())
+    }
+
+    /// Equivalent to [`Self::extend_from_slice`] but returns `Err` instead of panicking.
+    pub fn try_extend_from_slice(&mut self, slice: &[T]) -> Result<(), AllocError>
+    where
+        T: Copy,
+    {
+        self.raw_extend_from_slice(slice).map_err(|err| err.error)
+    }
+
+    fn raw_extend_from_slice(&mut self, slice: &[T]) -> Result<(), internal::Error>
+    where
+        T: Copy,
+    {
+        match self.inner.parse_marker() {
+            ParsedMarker::Small(len) if usize::from(len) + slice.len() <= N => {
+                unsafe {
+                    // SAFETY: marker is Small and `slice` can be safely copied
+                    self.extend_small(slice);
+                }
+                Ok(())
             }
+            ParsedMarker::Small(len) => unsafe {
+                self.move_small_to_large(usize::from(len) + slice.len())?;
+                self.extend_large_slice(slice)
+            },
+            ParsedMarker::Large => unsafe { self.extend_large_slice(slice) },
         }
     }
 
     /// Inserts an item at the specified index.
     ///
     /// # Panics
-    /// Panics if `index > len`.
+    /// Panics if `index > len` or if allocation fails.
+    /// See [`Self::push`] for allocation failure caveats.
     pub fn insert(&mut self, index: usize, value: T) {
-        self.reserve(1);
+        self.raw_insert(index, value).unwrap_or_else(|err| err.diverge());
+    }
+
+    /// Equivalent to [`Self::insert`] but returns `Err` instead of panicking.
+    pub fn try_insert(&mut self, index: usize, value: T) -> Result<(), AllocError> {
+        self.raw_insert(index, value).map_err(|err| err.error)
+    }
+
+    fn raw_insert(&mut self, index: usize, value: T) -> Result<(), internal::Error> {
+        self.raw_reserve(1)?;
         let (capacity_slice, len, mut set_len) = self.as_uninit_slice_with_length_setter();
         assert!(index <= len, "insertion index (is {index}) should be <= len (is {len})");
 
@@ -412,6 +523,7 @@ impl<T, const N: usize> WordVec<T, N> {
         unsafe {
             set_len.set_len(len + 1);
         }
+        Ok(())
     }
 
     /// # Safety
@@ -419,11 +531,11 @@ impl<T, const N: usize> WordVec<T, N> {
     /// - `self.len() + values.len()` must be less than or equal to `N`
     ///   (which will not overflow `u8`).
     /// - `values` has the same invariants as [`ptr::drop_in_place`].
-    unsafe fn extend_small(&mut self, values: *mut [T]) {
+    unsafe fn extend_small(&mut self, values: *const [T]) {
         debug_assert!(self.len() + values.len() <= N); // safety invariant check
 
         // SAFETY: function safety invariant
-        let small = unsafe { &mut self.0.small };
+        let small = unsafe { &mut self.inner.small };
 
         let current_len = usize::from(small.marker >> 1);
         let slice = &mut small.data.as_mut_slice()[current_len..current_len + values.len()];
@@ -448,7 +560,7 @@ impl<T, const N: usize> WordVec<T, N> {
     /// Panics if `values` yields more than `N - self.len()` items.
     unsafe fn extend_small_iter(&mut self, values: impl Iterator<Item = T>) {
         // SAFETY: function safety invariant
-        let small = unsafe { &mut self.0.small };
+        let small = unsafe { &mut self.inner.small };
 
         let current_len = usize::from(small.marker >> 1);
 
@@ -459,44 +571,74 @@ impl<T, const N: usize> WordVec<T, N> {
         }
     }
 
+    /// Push `value` behind the vector.
+    ///
+    /// # Safety
+    /// - The current marker must be `large`.
+    unsafe fn extend_large_one(&mut self, value: T) -> Result<(), internal::Error> {
+        // SAFETY: function safety invariant
+        let large = unsafe { &mut self.inner.large };
+        let (&Allocated { len, cap, .. }, _) = large.as_allocated();
+        let new_len = len.checked_add(1).expect("new length is out of bounds");
+        if new_len > cap {
+            large.try_grow(new_len, &self.alloc)?;
+            // on error, `value` is dropped in scope.
+        }
+
+        unsafe {
+            Allocated::extend_one(large.0, value);
+        }
+        Ok(())
+    }
+
+    /// Move the items from `values` behind the vector.
+    ///
+    /// When an error is returned, `values` is not dropped and the caller should reuse it.
+    ///
     /// # Safety
     /// - The current marker must be `large`.
     /// - `values` has the same invariants as [`ptr::drop_in_place`].
-    unsafe fn extend_large_slice(&mut self, values: *mut [T]) {
+    unsafe fn extend_large_slice(&mut self, values: *const [T]) -> Result<(), internal::Error> {
         // SAFETY: function safety invariant
-        let large = unsafe { &mut self.0.large };
+        let large = unsafe { &mut self.inner.large };
         let (&Allocated { len, cap, .. }, _) = large.as_allocated();
         let new_len = len.checked_add(values.len()).expect("new length is out of bounds");
         if new_len > cap {
-            large.grow(new_len);
+            large.try_grow(new_len, &self.alloc)?;
         }
 
         unsafe {
             Allocated::extend(large.0, values);
         }
+        Ok(())
     }
 
     /// # Safety
     /// The current marker must be `large`.
-    unsafe fn extend_large_iter(&mut self, values: impl Iterator<Item = T>) {
+    unsafe fn extend_large_iter(
+        &mut self,
+        values: impl Iterator<Item = T>,
+    ) -> Result<(), internal::Error> {
         // SAFETY: function safety invariant
-        let large = unsafe { &mut *self.0.large };
-        large.extend_iter(values);
+        let large = unsafe { &mut *self.inner.large };
+        large.try_extend_iter(values, &self.alloc)?;
+        Ok(())
     }
 
     /// # Safety
     /// - The current marker must be `small`
     /// - `new_cap` must be greater than or equal to `self.len()`.
-    unsafe fn move_small_to_large(&mut self, new_cap: usize) {
+    unsafe fn move_small_to_large(&mut self, new_cap: usize) -> Result<(), internal::Error> {
         // SAFETY: function safety invariant
-        let small = unsafe { &mut self.0.small };
+        let small = unsafe { &mut self.inner.small };
         let data = small.data.as_mut_ptr().cast::<T>();
         let small_len = small.marker >> 1;
         let data_slice = ptr::slice_from_raw_parts_mut(data, small_len.into());
 
-        let large = unsafe { Large::new(new_cap, data_slice) };
+        let large = unsafe { Large::try_new(new_cap, data_slice, &self.alloc)? };
 
-        self.0.large = ManuallyDrop::new(large);
+        self.inner.large = ManuallyDrop::new(large);
+        Ok(())
     }
 
     /// Reserves capacity for at least `additional` more elements to be inserted
@@ -507,8 +649,22 @@ impl<T, const N: usize> WordVec<T, N> {
     ///
     /// # Panics
     ///
-    /// Panics if the new capacity results in integer overflow.
+    /// Panics if the new capacity results in integer overflow or if allocation fails.
+    ///
+    /// Note that `reserve` may attempt to reserve more memory than `additional` alone,
+    /// but would not resort to reserving less even in the case of a failed allocation.
+    /// That is, panic is still possible even if the allocator is able to
+    /// grow the allocation to exactly `capacity() + additional` items.
     pub fn reserve(&mut self, additional: usize) {
+        self.raw_reserve(additional).unwrap_or_else(|err| err.diverge());
+    }
+
+    /// Equivalent to [`Self::reserve`] but returns `Err` instead of panicking.
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), AllocError> {
+        self.raw_reserve(additional).map_err(|err| err.error)
+    }
+
+    fn raw_reserve(&mut self, additional: usize) -> Result<(), internal::Error> {
         self.reserve_with(|args| {
             let req = args.len.checked_add(additional).expect("capacity overflow");
             if req <= args.cap {
@@ -518,7 +674,7 @@ impl<T, const N: usize> WordVec<T, N> {
             } else {
                 req
             }
-        });
+        })
     }
 
     /// Reserves the minimum capacity for at least `additional` more elements to
@@ -537,14 +693,26 @@ impl<T, const N: usize> WordVec<T, N> {
     ///
     /// Panics if the new capacity results in integer overflow.
     pub fn reserve_exact(&mut self, additional: usize) {
+        self.raw_reserve_exact(additional).unwrap_or_else(|err| err.diverge());
+    }
+
+    /// Equivalent to [`Self::reserve_exact`] but returns `Err` instead of panicking.
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), AllocError> {
+        self.raw_reserve_exact(additional).map_err(|err| err.error)
+    }
+
+    fn raw_reserve_exact(&mut self, additional: usize) -> Result<(), internal::Error> {
         self.reserve_with(|args| {
             let req = args.len.checked_add(additional).expect("capacity overflow");
             req.max(args.cap)
-        });
+        })
     }
 
-    fn reserve_with(&mut self, get_new_cap: impl FnOnce(ReserveArgs) -> usize) {
-        match self.0.parse_marker() {
+    fn reserve_with(
+        &mut self,
+        get_new_cap: impl FnOnce(ReserveArgs) -> usize,
+    ) -> Result<(), internal::Error> {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(len) => {
                 let len = usize::from(len);
                 let new_cap = get_new_cap(ReserveArgs { len, cap: N });
@@ -552,18 +720,20 @@ impl<T, const N: usize> WordVec<T, N> {
                     // SAFETY: parsed marker as small,
                     // and new_cap > N >= len
                     unsafe {
-                        self.move_small_to_large(new_cap);
+                        self.move_small_to_large(new_cap)?;
                     }
                 }
+                Ok(())
             }
             ParsedMarker::Large => {
                 // SAFETY: parsed marker as large
-                let large = unsafe { &mut self.0.large };
+                let large = unsafe { &mut self.inner.large };
                 let (&Allocated { len, cap, .. }, _) = large.as_allocated();
                 let new_cap = get_new_cap(ReserveArgs { len, cap });
                 if new_cap > cap {
-                    large.grow_exact(new_cap);
+                    large.try_grow_exact(new_cap, &self.alloc)?;
                 }
+                Ok(())
             }
         }
     }
@@ -573,7 +743,9 @@ impl<T, const N: usize> WordVec<T, N> {
     /// If the new capacity fits into the inlined layout,
     /// the data is moved to the inlined layout.
     /// Otherwise, the allocation is reallocated to the smaller size.
-    pub fn shrink_to_fit(&mut self) { self.shrink_to_with(|args| args.len.max(N)); }
+    pub fn shrink_to_fit(&mut self) {
+        self.shrink_to_with(|args| args.len).unwrap_or_else(|err| err.diverge());
+    }
 
     /// Shrinks the capacity of the vector with a lower bound.
     ///
@@ -590,58 +762,77 @@ impl<T, const N: usize> WordVec<T, N> {
         // - at least self.len(), so that data do not get truncated
         // - at least min_cap, as requested
         // - at least N, because capacity can never be less than N
-        self.shrink_to_with(|args| args.len.max(min_cap).max(N));
+        //   (this is checked by `shrink_to_with`)
+        self.shrink_to_with(|args| args.len.max(min_cap)).unwrap_or_else(|err| err.diverge());
     }
 
-    fn shrink_to_with(&mut self, get_new_cap: impl FnOnce(ShrinkToArgs) -> usize) {
-        if let ParsedMarker::Small(_) = self.0.parse_marker() {
-            return; // small cannot be further shrunk
-        }
+    /// Equivalent to [`Self::shrink_to`] but returns `Err` instead of panicking.
+    pub fn try_shrink_to(&mut self, min_cap: usize) -> Result<(), AllocError> {
+        self.shrink_to_with(|args| args.len.max(min_cap)).map_err(|err| err.error)
+    }
+
+    fn shrink_to_with(
+        &mut self,
+        get_new_cap: impl FnOnce(ShrinkToArgs) -> usize,
+    ) -> Result<(), internal::Error> {
+        let ParsedMarker::Large = self.inner.parse_marker() else {
+            return Ok(()); // small cannot be further shrunk
+        };
 
         // SAFETY: marker is Large
-        let large = unsafe { &mut *self.0.large };
+        let large = unsafe { &mut *self.inner.large };
         let alloc_ptr = large.0;
         // SAFETY: alloc_ptr is still valid.
-        let &Allocated { len, .. } = unsafe { alloc_ptr.as_ref() };
+        let &Allocated { len, cap, .. } = unsafe { alloc_ptr.as_ref() };
         let large_layout = large.current_layout();
 
-        let new_cap = get_new_cap(ShrinkToArgs { len });
-        if new_cap == N {
+        let new_min_cap = get_new_cap(ShrinkToArgs { len });
+        if new_min_cap >= cap {
+            // no need to shrink
+            // as per std::vec behavior, this shouldn't grow either
+            return Ok(());
+        }
+
+        if new_min_cap <= N {
+            // move large to small
+
             // SAFETY: alloc_ptr is still valid.
             let data_start = unsafe { Allocated::data_start(alloc_ptr) };
 
-            self.0.small = ManuallyDrop::new(Small::new_uninit(len));
+            self.inner.small = ManuallyDrop::new(Small::new_uninit(len));
             // SAFETY:
             // - data_start is derived from alloc_ptr, which must not point back to itself
-            // - self.0 is now initialized as Small.
+            // - self.inner is now initialized as Small.
             // - data_start is still valid until alloc_ptr is deallocated below.
             unsafe {
-                ptr::copy_nonoverlapping(data_start, (*self.0.small).data.as_mut_ptr().cast(), len);
+                ptr::copy_nonoverlapping(
+                    data_start,
+                    (*self.inner.small).data.as_mut_ptr().cast(),
+                    len,
+                );
             }
 
             // This is the last statement of this branch,
             // and alloc_ptr is no longer referenced since
-            // its only reference was overwritten by writing to self.0.small above.
+            // its only reference was overwritten by writing to self.inner.small above.
             unsafe {
-                dealloc(alloc_ptr.as_ptr().cast(), large_layout);
+                self.alloc.deallocate(alloc_ptr.cast(), large_layout);
             }
+
+            Ok(())
         } else {
             // SAFETY: alloc_ptr is still valid at this point, and new_cap > N > 0.
-            let new_layout = Large::<T>::new_layout(new_cap);
+            let new_layout = Large::<T>::new_layout(new_min_cap);
             let new_alloc_ptr =
-                unsafe { realloc(alloc_ptr.as_ptr().cast(), large_layout, new_layout.size()) };
-            match NonNull::new(new_alloc_ptr) {
-                None => {
-                    handle_alloc_error(new_layout);
-                }
-                Some(new_alloc_ptr) => {
-                    large.0 = new_alloc_ptr.cast();
-                    // SAFETY: large.0 has just been updated to a new valid allocation.
-                    unsafe {
-                        large.0.as_mut().cap = new_cap;
-                    }
-                }
+                unsafe { self.alloc.shrink(alloc_ptr.cast(), large_layout, new_layout) }
+                    .map_err(internal::Error::mapper(new_layout))?;
+            large.0 = new_alloc_ptr.cast();
+            // SAFETY: large.0 has just been updated to a new valid allocation.
+            unsafe {
+                large.0.as_mut().cap = new_min_cap;
             }
+
+            Ok(())
         }
     }
 
@@ -719,10 +910,10 @@ impl<T, const N: usize> WordVec<T, N> {
     ///
     /// Returns the *original* initialized slice before removing the last item.
     fn remove_last_uninit(&mut self, len_gt: usize) -> Option<&mut [MaybeUninit<T>]> {
-        match self.0.parse_marker() {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(old_len) => {
                 // SAFETY: marker is Small
-                let small = unsafe { &mut self.0.small };
+                let small = unsafe { &mut self.inner.small };
 
                 if usize::from(old_len) <= len_gt {
                     return None;
@@ -735,7 +926,7 @@ impl<T, const N: usize> WordVec<T, N> {
             }
             ParsedMarker::Large => {
                 // SAFETY: marker is Large
-                let large = unsafe { &mut self.0.large };
+                let large = unsafe { &mut self.inner.large };
                 let (allocated, data_start) = large.as_allocated_mut();
 
                 let old_len = allocated.len;
@@ -887,19 +1078,40 @@ impl<T, const N: usize> WordVec<T, N> {
     }
 }
 
-impl<T: Clone, const N: usize> WordVec<T, N> {
+impl<T: Clone, const N: usize> WordVec<T, N, Global> {
     /// Creates a new vector with `count` copies of `elem`.
-    pub fn from_elem(elem: T, count: usize) -> Self {
-        if count <= N {
+    ///
+    /// # Panics
+    /// Panics when `count > N` and the global allocator cannot allocate `count` items of type `T`.
+    pub fn from_elem(elem: T, count: usize) -> Self { Self::from_elem_in(elem, count, Global) }
+}
+
+impl<T: Clone, const N: usize, A: Allocator> WordVec<T, N, A> {
+    /// Equivalent to [`Self::from_elem`] but allows specifying the allocator.
+    ///
+    /// # Panics
+    /// Panics when `count > N` and `alloc` cannot allocate `count` items of type `T`.
+    pub fn from_elem_in(elem: T, count: usize, alloc: A) -> Self {
+        Self::raw_from_elem_in(elem, count, alloc).unwrap_or_else(|err| err.diverge())
+    }
+
+    /// Equivalent to [`Self::from_elem_in`] but returns a `Result` instead of panicking.
+    pub fn try_from_elem_in(elem: T, count: usize, alloc: A) -> Result<Self, AllocError> {
+        Self::raw_from_elem_in(elem, count, alloc).map_err(|err| err.error)
+    }
+
+    fn raw_from_elem_in(elem: T, count: usize, alloc: A) -> Result<Self, internal::Error> {
+        let inner = if count <= N {
             let mut data = [const { MaybeUninit::uninit() }; N];
             unwind_safe_write_slice(&mut data[..count], |_| elem.clone());
 
-            Self(Inner { small: ManuallyDrop::new(Small::new(count, data)) })
+            Inner { small: ManuallyDrop::new(Small::new(count, data)) }
         } else {
-            let mut large = Large::new_empty(count);
-            large.extend_iter(iter::repeat_n(elem, count));
-            Self(Inner { large: ManuallyDrop::new(large) })
-        }
+            let mut large = Large::try_new_empty(count, &alloc)?;
+            large.try_extend_iter(iter::repeat_n(elem, count), &alloc)?;
+            Inner { large: ManuallyDrop::new(large) }
+        };
+        Ok(Self { inner, alloc })
     }
 
     /// Resizes the vector so that its length is equal to `len`.
@@ -1038,7 +1250,7 @@ fn shift_right_once<T>(slice: &mut [MaybeUninit<T>]) {
     }
 }
 
-impl<T, const LENGTH: usize, const N: usize> From<[T; LENGTH]> for WordVec<T, N> {
+impl<T, const LENGTH: usize, const N: usize> From<[T; LENGTH]> for WordVec<T, N, Global> {
     fn from(value: [T; LENGTH]) -> Self {
         Inner::<T, N>::assert_generics();
 
@@ -1048,26 +1260,31 @@ impl<T, const LENGTH: usize, const N: usize> From<[T; LENGTH]> for WordVec<T, N>
                 dest.write(src);
             }
 
-            Self(Inner {
-                small: ManuallyDrop::new(Small {
-                    marker: u8::try_from(LENGTH << 1).expect("LENGTH * 2 <= N * 2 <= 254") | 1,
-                    data,
-                }),
-            })
+            Self {
+                inner: Inner {
+                    small: ManuallyDrop::new(Small {
+                        marker: u8::try_from(LENGTH << 1).expect("LENGTH * 2 <= N * 2 <= 254") | 1,
+                        data,
+                    }),
+                },
+                alloc: Global,
+            }
         } else {
             let mut value = ManuallyDrop::new(value);
-            let large = unsafe { Large::new(LENGTH, &mut *value) };
-            Self(Inner { large: ManuallyDrop::new(large) })
+            let large = unsafe {
+                Large::try_new(LENGTH, &mut *value, &Global).unwrap_or_else(|err| err.diverge())
+            };
+            Self { inner: Inner { large: ManuallyDrop::new(large) }, alloc: Global }
         }
     }
 }
 
-impl<T, const N: usize> Drop for WordVec<T, N> {
+impl<T, const N: usize, A: Allocator> Drop for WordVec<T, N, A> {
     fn drop(&mut self) {
-        match self.0.parse_marker() {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(len) => {
                 // SAFETY: variant indicated by marker
-                let small = unsafe { &mut self.0.small };
+                let small = unsafe { &mut self.inner.small };
                 // SAFETY: len must be less than or equal to N
                 let uninit_slice = unsafe { small.data.get_unchecked_mut(..usize::from(len)) };
                 // SAFETY: marker indicates that all first `len` elements are initialized.
@@ -1075,7 +1292,7 @@ impl<T, const N: usize> Drop for WordVec<T, N> {
             }
             ParsedMarker::Large => {
                 // SAFETY: variant indicated by marker
-                let large = unsafe { &mut self.0.large };
+                let large = unsafe { &mut self.inner.large };
                 // SAFETY: Large.0 is always a valid reference.
                 let (allocated, data_start) = large.as_allocated_mut();
                 // SAFETY: `allocated.data` is always a valid slice pointer of length `allocated.len`,
@@ -1087,18 +1304,23 @@ impl<T, const N: usize> Drop for WordVec<T, N> {
 
                 // SAFETY: everything is now cleaned up, the allocation will no longer be used.
                 unsafe {
-                    dealloc(large.0.as_ptr().cast(), large.current_layout());
+                    self.alloc.deallocate(large.0.cast(), large.current_layout());
                 }
             }
         }
     }
 }
 
-impl<T, const N: usize> Clone for WordVec<T, N>
+impl<T, const N: usize, A> Clone for WordVec<T, N, A>
 where
     T: Clone,
+    A: Allocator + Clone,
 {
-    fn clone(&self) -> Self { self.iter().cloned().collect() }
+    fn clone(&self) -> Self {
+        let mut new = Self::with_capacity_in(self.len(), self.alloc.clone());
+        new.extend(self.iter().cloned());
+        new
+    }
 
     fn clone_from(&mut self, source: &Self) {
         let source_len = source.len();
@@ -1117,12 +1339,12 @@ where
     }
 }
 
-impl<T, const N: usize> Extend<T> for WordVec<T, N> {
+impl<T, const N: usize, A: Allocator> Extend<T> for WordVec<T, N, A> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let mut iter = iter.into_iter();
         let hint_min = iter.size_hint().0;
 
-        match self.0.parse_marker() {
+        match self.inner.parse_marker() {
             ParsedMarker::Small(len) if usize::from(len) + hint_min <= N => {
                 // SAFETY: marker is Small
                 unsafe {
@@ -1134,30 +1356,31 @@ impl<T, const N: usize> Extend<T> for WordVec<T, N> {
                     // The iterator has more items than `hint_min`.
                     // We don't know how many more we will get, so our best bet is to double it.
                     unsafe {
-                        self.move_small_to_large(N * 2);
+                        self.move_small_to_large(N * 2).unwrap_or_else(|err| err.diverge());
                     }
                     // SAFETY: we have moved to large right above.
-                    unsafe { self.extend_large_iter(peekable) }
+                    unsafe { self.extend_large_iter(peekable).unwrap_or_else(|err| err.diverge()) }
                 }
             }
             ParsedMarker::Small(len) => {
                 unsafe {
-                    self.move_small_to_large(usize::from(len) + hint_min);
+                    self.move_small_to_large(usize::from(len) + hint_min)
+                        .unwrap_or_else(|err| err.diverge());
                 }
                 // SAFETY: we have moved to large right above.
-                unsafe { self.extend_large_iter(iter) }
+                unsafe { self.extend_large_iter(iter).unwrap_or_else(|err| err.diverge()) }
             }
             ParsedMarker::Large => {
                 // SAFETY: marker is Large
-                unsafe { self.extend_large_iter(iter) }
+                unsafe { self.extend_large_iter(iter).unwrap_or_else(|err| err.diverge()) }
             }
         }
     }
 }
 
 // SAFETY: These are equivalent to the safety of `Vec<T>`.
-unsafe impl<T: Send, const N: usize> Send for WordVec<T, N> {}
-unsafe impl<T: Sync, const N: usize> Sync for WordVec<T, N> {}
+unsafe impl<T: Send, const N: usize, A: Allocator + Send> Send for WordVec<T, N, A> {}
+unsafe impl<T: Sync, const N: usize, A: Allocator + Sync> Sync for WordVec<T, N, A> {}
 
 mod macros;
 mod trivial_traits;
