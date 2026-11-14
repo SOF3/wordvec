@@ -1,3 +1,5 @@
+use alloc::alloc::Global;
+use core::alloc::Allocator;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::{fmt, iter};
@@ -7,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use super::WordVec;
 
-impl<T, const N: usize> Serialize for WordVec<T, N>
+impl<T, const N: usize, A: Allocator> Serialize for WordVec<T, N, A>
 where
     T: Serialize,
 {
@@ -19,7 +21,7 @@ where
     }
 }
 
-impl<'de, T, const N: usize> Deserialize<'de> for WordVec<T, N>
+impl<'de, T, const N: usize> Deserialize<'de> for WordVec<T, N, Global>
 where
     T: Deserialize<'de>,
 {
@@ -44,7 +46,7 @@ impl<'de, T, const N: usize> de::Visitor<'de> for DeVisitor<T, N>
 where
     T: Deserialize<'de>,
 {
-    type Value = WordVec<T, N>;
+    type Value = WordVec<T, N, Global>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter.write_str("a sequence")
@@ -54,7 +56,7 @@ where
     where
         A: de::SeqAccess<'de>,
     {
-        let mut vec = WordVec::<T, N>::with_capacity(seq.size_hint().unwrap_or(N));
+        let mut vec = WordVec::<T, N, Global>::with_capacity(seq.size_hint().unwrap_or(N));
         let mut break_err = None;
         vec.extend(iter::from_fn(|| match seq.next_element() {
             Ok(Some(v)) => Some(v),
@@ -71,7 +73,7 @@ where
     }
 }
 
-struct DeInPlaceVisitor<'place, T, const N: usize>(&'place mut WordVec<T, N>);
+struct DeInPlaceVisitor<'place, T, const N: usize>(&'place mut WordVec<T, N, Global>);
 
 impl<'de, T, const N: usize> de::Visitor<'de> for DeInPlaceVisitor<'_, T, N>
 where

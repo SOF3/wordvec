@@ -1,4 +1,4 @@
-use alloc::alloc::dealloc;
+use core::alloc::Allocator;
 use core::array;
 use core::iter::{self, FusedIterator};
 use core::mem::{ManuallyDrop, MaybeUninit, needs_drop};
@@ -6,38 +6,42 @@ use core::ptr::{self, NonNull};
 
 use crate::{Allocated, Large, ParsedMarker, WordVec};
 
-impl<T, const N: usize> IntoIterator for WordVec<T, N> {
+impl<T, const N: usize, A: Allocator> IntoIterator for WordVec<T, N, A> {
     type Item = T;
-    type IntoIter = IntoIter<T, N>;
+    type IntoIter = IntoIter<T, N, A>;
 
     fn into_iter(self) -> Self::IntoIter {
-        let mut this = ManuallyDrop::new(self); // the real destructor is called by `IntoIter`.
-        match this.0.parse_marker() {
+        let (mut inner, alloc) = {
+            // Destructure into parts. The real destructor is called by `IntoIter`.
+            let this = ManuallyDrop::new(self);
+            unsafe { (ptr::read(&raw const this.inner), ptr::read(&raw const this.alloc)) }
+        };
+        match inner.parse_marker() {
             ParsedMarker::Small(len) => {
                 // SAFETY: indicated by marker
-                let small = unsafe { ManuallyDrop::take(&mut this.0.small) };
+                let small = unsafe { ManuallyDrop::take(&mut inner.small) };
                 let data = small.data;
                 let valid = data.into_iter().take(len.into());
                 IntoIter(IntoIterInner::Small(valid.into_iter()))
             }
             ParsedMarker::Large => {
                 // SAFETY: indicated by marker
-                let alloc = unsafe { this.0.large.0 };
-                IntoIter(IntoIterInner::Large { alloc, start: 0 })
+                let ptr = unsafe { inner.large.0 };
+                IntoIter(IntoIterInner::Large { ptr, start: 0, alloc })
             }
         }
     }
 }
 
 /// Implements [`IntoIterator`] for [`WordVec`].
-pub struct IntoIter<T, const N: usize>(IntoIterInner<T, N>);
+pub struct IntoIter<T, const N: usize, A: Allocator>(IntoIterInner<T, N, A>);
 
-enum IntoIterInner<T, const N: usize> {
+enum IntoIterInner<T, const N: usize, A: Allocator> {
     Small(iter::Take<array::IntoIter<MaybeUninit<T>, N>>),
-    Large { alloc: NonNull<Allocated<T>>, start: usize },
+    Large { ptr: NonNull<Allocated<T>>, start: usize, alloc: A },
 }
 
-impl<T, const N: usize> Iterator for IntoIter<T, N> {
+impl<T, const N: usize, A: Allocator> Iterator for IntoIter<T, N, A> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -46,7 +50,7 @@ impl<T, const N: usize> Iterator for IntoIter<T, N> {
                 // SAFETY: only initialized values are taken
                 iter.next().map(|uninit| unsafe { uninit.assume_init() })
             }
-            IntoIterInner::Large { alloc, start } => {
+            IntoIterInner::Large { ptr: alloc, start, alloc: _ } => {
                 // SAFETY: the header is always valid before drop.
                 let len = unsafe { alloc.as_mut() }.len;
 
@@ -68,21 +72,21 @@ impl<T, const N: usize> Iterator for IntoIter<T, N> {
 // Small: array::IntoIter implements FusedIterator.
 // Large: we check `index >= len` before incrementing (not doing so may lead to UB caused by
 // overflow).
-impl<T, const N: usize> FusedIterator for IntoIter<T, N> {}
+impl<T, const N: usize, A: Allocator> FusedIterator for IntoIter<T, N, A> {}
 
-impl<T, const N: usize> Drop for IntoIter<T, N> {
+impl<T, const N: usize, A: Allocator> Drop for IntoIter<T, N, A> {
     fn drop(&mut self) {
         match &mut self.0 {
             IntoIterInner::Small(iter) => {
                 // SAFETY: only initialized values are taken
                 iter.by_ref().for_each(|uninit| drop(unsafe { uninit.assume_init() }));
             }
-            IntoIterInner::Large { alloc, start } => {
+            IntoIterInner::Large { ptr, start, alloc } => {
                 // SAFETY: the header is always valid before drop.
-                let &mut Allocated { len, cap, .. } = unsafe { alloc.as_mut() };
+                let &mut Allocated { len, cap, .. } = unsafe { ptr.as_mut() };
 
                 if needs_drop::<T>() {
-                    let value = unsafe { Allocated::data_start(*alloc) };
+                    let value = unsafe { Allocated::data_start(*ptr) };
                     // SAFETY: `start` <= `len`.
                     let start_ptr = unsafe { value.add(*start) };
                     // SAFETY: All items in the range start..len are still initialized and need
@@ -96,7 +100,7 @@ impl<T, const N: usize> Drop for IntoIter<T, N> {
                 let layout = Large::<T>::new_layout(cap);
                 // SAFETY: alloc is valid before dropped; layout is provided by the header itself.
                 unsafe {
-                    dealloc(alloc.as_ptr().cast(), layout);
+                    alloc.deallocate(ptr.cast(), layout);
                 }
             }
         }

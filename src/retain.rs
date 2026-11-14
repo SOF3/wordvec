@@ -1,3 +1,4 @@
+use core::alloc::Allocator;
 use core::hint::assert_unchecked;
 use core::iter::FusedIterator;
 use core::mem::{self, MaybeUninit};
@@ -21,7 +22,7 @@ pub(super) struct Retain<'a, T> {
 
 impl<'a, T> Retain<'a, T> {
     pub(super) fn new<const N: usize>(
-        vec: &'a mut super::WordVec<T, N>,
+        vec: &'a mut super::WordVec<T, N, impl Allocator>,
         range: impl RangeBounds<usize>,
     ) -> Self {
         let (capacity_slice, old_len, mut set_len) = vec.as_uninit_slice_with_length_setter();
